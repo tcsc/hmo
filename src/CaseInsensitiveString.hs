@@ -2,8 +2,8 @@ module CaseInsensitiveString (CaseInsensitiveString, fromString) where
 
 import Data.Char
 
---| Wraps a standard string with a phantom type for performing case-insensitive
---  comparisons
+-- | Wraps a standard string with a phantom type for performing case-insensitive
+--   comparisons
 newtype CaseInsensitiveString = CIS String deriving (Show)
 
 instance Eq CaseInsensitiveString where
