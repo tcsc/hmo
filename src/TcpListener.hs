@@ -28,7 +28,6 @@ import Network.Socket as Socket
 import System.Event
 import System.Log.Logger
 
-
 import ThreadManager
 
 type ConnectionHandler = Socket -> IO ()

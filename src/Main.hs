@@ -29,6 +29,7 @@ import System.Log.Handler.Simple
 
 import Config
 import TcpListener
+import RtspConnection
 
 data Msg = Interrupt
 
@@ -64,6 +65,8 @@ main = do
         Interrupt -> return () 
         _ -> mainLoop q
       
+-- | Handles an interrupt signal from the system and sends a signal to the main thread to
+--   exit
 interrupt :: MsgQ -> IO ()
 interrupt q = atomically $ writeTChan q Interrupt
   
@@ -73,13 +76,12 @@ setLogger = do
   updateGlobalLogger rootLoggerName (setLevel DEBUG . setHandlers [vl])
   return ()
 
+-- |
 bindPort :: TcpListener -> Word16 -> IO ()
 bindPort listener port = do 
-  bind listener AF_INET iNADDR_ANY (PortNum port) newConnection
+  bind listener AF_INET iNADDR_ANY (PortNum port) 
+       (\s -> do { RtspConnection.new s; return (); } )
   return ()
-
-newConnection :: Socket -> IO ()
-newConnection s = return ()
 
 -- |
 split :: Eq a => a -> [a] -> [[a]]
