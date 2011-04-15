@@ -52,14 +52,14 @@ message = do
     h <- headers
     s <- case readSequence h of 
            Just n -> return n
-           Nothing -> fail "Sequence"
+           Nothing -> fail "Missing sequence number"
     return $ msgUpdate s h msg
   where
     readSequence :: Headers -> Maybe Int
-    readSequence hs = case getHeader "cseq" hs of
-                        Just s -> Just (read s :: Int)
-                        Nothing -> Nothing
-
+    readSequence hs = do 
+      s <- getHeader "cseq" hs
+      maybeInt s
+      
 request = do 
   v <- verb
   spaces
@@ -91,12 +91,18 @@ uri = do
     Just uri -> return uri
     Nothing -> fail "Uri"
   
+integer = do
+  t <- many1 digit
+  case maybeInt t of 
+    Just n -> return n
+    Nothing -> fail "Integer"
+    
 version = do 
   string ("RTSP/")
-  major <- many1 digit
+  major <- integer
   char '.'
-  minor <- many1 digit
-  return (read major :: Int, read minor ::Int) 
+  minor <- integer
+  return (major, minor) 
 
 -- | 
 headers = do
@@ -118,6 +124,11 @@ endOfLine = do
    try (string "\r\n") 
           <|> string "\r"
           <|> string "\n"
+
+maybeInt s = case (reads s :: [(Int, String)]) of
+               [] -> Nothing
+               [(n, _)] -> Just n
+
 
 toEnum :: Int -> Status
 toEnum n = case n of 
