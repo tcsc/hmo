@@ -29,8 +29,8 @@ data Message = Request Int Verb URI Version Headers
              | Response Int Status Headers
   
 instance Show Message where 
-  show (Request s v u ver h) = "#" ++ (show s) ++ " " ++ (show v) ++ " " ++ (show u) 
-  show (Response _ s h) = (show s) 
+  show (Request s v u _ _) = "#" ++ (show s) ++ " " ++ (show v) ++ " " ++ (show u) 
+  show (Response _ s _) = (show s) 
 
 -- | gets the sequence number of a message
 msgSequence :: Message -> Int

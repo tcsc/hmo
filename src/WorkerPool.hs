@@ -25,7 +25,7 @@ module WorkerPool(WorkerPool,
                   stopWorkerPool) where
 
 import Control.Exception(SomeException, bracket, try)
-import Control.Concurrent (ThreadId, forkIO, myThreadId, threadDelay)
+import Control.Concurrent (ThreadId, forkIO, myThreadId)
 import Control.Concurrent.STM
 import Data.List
 import Data.Maybe
@@ -95,7 +95,7 @@ newWorkerPool threads setup teardown handler = do
   mgrQ <- newTChanIO
   wkrQ <- newTChanIO
   let funs = PoolFuns setup teardown handler
-  forkIO $ mgrThreadMain threads mgrQ wkrQ funs
+  _ <- forkIO $ mgrThreadMain threads mgrQ wkrQ funs
   return $ MkWorkerPool mgrQ wkrQ
 
 -- | Stops the worker pool, but does not wait for the pool threads to exit.
