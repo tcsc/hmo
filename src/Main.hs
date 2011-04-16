@@ -46,10 +46,9 @@ main = do
       Right config -> do 
         infoLog "Setting signal handler"
         installHandler sigINT (Catch $ interrupt q) Nothing
-
-        infoLog "Starting listeners"    
+        
         listener <- newListener
-        foldM_ (\_ port -> bindPort listener port) () (ports config)
+        startRtsp listener config
   
         infoLog "Entering main processing loop"
         mainLoop q
@@ -58,6 +57,14 @@ main = do
         stopListener listener
         infoLog "Exiting"
   where 
+    startRtsp :: TcpListener -> Config -> IO ()
+    startRtsp listener cfg = do
+      infoLog "Starting RTSP listeners"
+      let rtspCfg = rtspConfig cfg 
+      foldM_ (\_ port -> bindRtsp listener port (rtspCutoff rtspCfg)) 
+             ()
+             (rtspPorts rtspCfg)
+    
     mainLoop :: MsgQ -> IO ()
     mainLoop q = do 
       msg <- atomically $ readTChan q
@@ -65,8 +72,8 @@ main = do
         Interrupt -> return () 
         _ -> mainLoop q
       
--- | Handles an interrupt signal from the system and sends a signal to the main thread to
---   exit
+-- | Handles an interrupt signal from the system and sends a signal to the main
+--   thread to exit
 interrupt :: MsgQ -> IO ()
 interrupt q = atomically $ writeTChan q Interrupt
   
@@ -77,10 +84,10 @@ setLogger = do
   return ()
 
 -- |
-bindPort :: TcpListener -> Word16 -> IO ()
-bindPort listener port = do 
+bindRtsp :: TcpListener -> Word16 -> Int -> IO ()
+bindRtsp listener port cutoff = do 
   bind listener AF_INET iNADDR_ANY (PortNum port) 
-       (\s -> do { RtspConnection.new s; return (); } )
+       (\s -> do { RtspConnection.new s cutoff; return (); } )
   return ()
 
 -- |

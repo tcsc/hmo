@@ -32,10 +32,10 @@ instance Exception ExitReader
 
 -- | Spawns a new connection manager thread and returns a RtspConnection that 
 --   can used to address the connection
-new :: Socket -> IO RtspConnection
-new s = do
+new :: Socket -> Int -> IO RtspConnection
+new s maxData = do
   msgQ <- newTChanIO
-  forkIO $ runConnection s msgQ
+  forkIO $ runConnection s maxData msgQ
   return (MkConn msgQ)
   
 data ConnState = State {
@@ -44,9 +44,9 @@ data ConnState = State {
 
 -- | The main connection thread. Spawns a reader thread and then starts handling all
 --   of the messages sent to the connection 
-runConnection :: Socket -> MsgQ -> IO ()
-runConnection s msgQ = do
-    tid <- forkIO $ reader s msgQ
+runConnection :: Socket -> Int -> MsgQ -> IO ()
+runConnection s maxData msgQ = do
+    tid <- forkIO $ reader s maxData msgQ
     loop s msgQ (State tid) `finally` sClose s
   where 
     loop :: Socket -> MsgQ -> ConnState -> IO ()
@@ -58,12 +58,12 @@ runConnection s msgQ = do
 
 data ReaderState = RdState 
 
-reader :: Socket -> MsgQ -> IO ()
-reader s q = do 
+reader :: Socket -> Int -> MsgQ -> IO ()
+reader s maxData q = do 
     let state = RdState 
-    readLoop s q state `catch` \(ExitReader rpy) -> atomically $ putTMVar rpy OK
+    readLoop s maxData q state `catch` \(ExitReader rpy) -> atomically $ putTMVar rpy OK
   where 
-    readLoop :: Socket -> MsgQ -> ReaderState -> IO ()
-    readLoop s q state = do
+    readLoop :: Socket -> Int -> MsgQ -> ReaderState -> IO ()
+    readLoop s maxData q state = do
       recv s 1024
-      readLoop s q state
+      readLoop s maxData q state

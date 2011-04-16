@@ -1,6 +1,10 @@
 module Config (
   Config(..),
-  loadConfig
+  RtspConfig,
+  loadConfig,
+  rtspConfig,
+  rtspPorts,
+  rtspCutoff
 ) where
 
 import Control.Exception
@@ -13,7 +17,12 @@ import System.Log.Logger
 import LuaUtils
 
 data Config = Config {
-  ports :: ![Word16]
+  rtspConfig :: !RtspConfig
+} deriving (Show)
+
+data RtspConfig = RTSP {
+  rtspPorts :: ![Word16],
+  rtspCutoff :: !Int  
 } deriving (Show)
 
 loadConfig :: String -> IO (Either String Config)
@@ -31,8 +40,8 @@ loadConfig filename = bracket (Lua.newstate)
     execConfig lua = do
       execLua lua (\l -> do infoLog "Executing config script"
                             Lua.call l 0 0) 
-                  (\l -> do { ports <- getPorts l; return $ Right (Config ports); } )
-                
+                  readConfig
+                  
     execLua :: Lua.LuaState -> (Lua.LuaState -> IO Int) -> 
                                (Lua.LuaState -> IO (Either String a)) -> 
                                IO (Either String a)
@@ -45,15 +54,37 @@ loadConfig filename = bracket (Lua.newstate)
                                 Just s -> s
                                 Nothing -> "Unexpected error"
                 return (Left errText)
-  
-    getPorts :: Lua.LuaState -> IO [Word16]
-    getPorts l = bracket_ (Lua.getglobal l "ports")
-                          (Lua.pop l 1)
-                          (do t <- Lua.istable l (-1)
-                              case t of 
-                                True -> mapTable l (\(x::Lua.LuaInteger) -> fromIntegral x)
-                                False -> return [])
 
+readConfig :: Lua.LuaState -> IO (Either String Config)
+readConfig lua  = do 
+  rtsp <- readRtspConfig lua
+  case rtsp of 
+    Nothing -> return $ Left "No RTSP config"
+    Just rtspCfg -> return $ Right (Config rtspCfg)
+
+readRtspConfig :: Lua.LuaState -> IO (Maybe RtspConfig)
+readRtspConfig lua = bracketGlobal lua "rtsp" readRtsp
+  where 
+    readRtsp :: Lua.LuaState -> IO (Maybe RtspConfig)
+    readRtsp lua = do
+      t <- Lua.istable lua (-1)
+      case t of
+        False -> return Nothing 
+        True -> do 
+          ports <- bracketField lua "ports" readPortTable
+          cutoff <- bracketField lua "cutoff" (\l -> do x <- Lua.peek l (-1)
+                                                        case x of 
+                                                          Just n -> return n
+                                                          Nothing -> return 1024 )
+          return $ Just (RTSP ports cutoff)
+        
+readPortTable :: Lua.LuaState -> IO [Word16]
+readPortTable lua = do 
+   t <- Lua.istable lua (-1)
+   case t of
+     True -> mapTable lua ((\x -> fromIntegral x) :: Lua.LuaInteger -> Word16)
+     False -> return []
+        
 debugLog :: String -> IO ()
 debugLog = debugM "config"
 
