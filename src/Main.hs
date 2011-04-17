@@ -41,12 +41,14 @@ main = do
     setLogger
     infoLog "Loading configuration"
     cfg <- loadConfig "config.lua"
+    
     case cfg of 
       Left err -> infoLog ("Configuration failed: " ++ err)
       Right config -> do 
-        infoLog "Setting signal handler"
+        infoLog "Installing interrupt signal handler"
         installHandler sigINT (Catch $ interrupt q) Nothing
-        
+
+        infoLog "Creating TCP listener"        
         listener <- newListener
         startRtsp listener config
   
@@ -70,13 +72,13 @@ main = do
       msg <- atomically $ readTChan q
       case msg of 
         Interrupt -> return () 
-        _ -> mainLoop q
       
 -- | Handles an interrupt signal from the system and sends a signal to the main
 --   thread to exit
 interrupt :: MsgQ -> IO ()
 interrupt q = atomically $ writeTChan q Interrupt
-  
+
+-- | Installs and configures the default logger
 setLogger :: IO ()
 setLogger = do
   vl <- verboseStreamHandler stdout DEBUG
