@@ -7,10 +7,14 @@ import Prelude hiding (catch)
 import Control.Concurrent
 import Control.Concurrent.STM
 import Control.Exception(Exception, catch, finally, bracket, try)
+import Control.Monad
+import Control.Monad.Trans
 import Data.Typeable
 import Network.Socket hiding (send, sendTo, recv, recvFrom)
 import Network.Socket.ByteString
 import qualified Data.ByteString as B
+
+import Control.Monad.Trans.Maybe
 
 import qualified Rtsp as Rtsp
 
@@ -35,6 +39,8 @@ instance Show (TMVar a) where
 data ExitReader = ExitReader ReplyVar 
   deriving (Show, Typeable)
 instance Exception ExitReader
+
+type MaybeIO a = MaybeT IO a
 
 -- | Spawns a new connection manager thread and returns a RtspConnection that 
 --   can used to address the connection
@@ -105,48 +111,49 @@ reader s maxData q = do
       let available = B.length bytes
       if available == 0 
         then return (bytes, state)
-        else do
-          rval <- do case pending of 
-                        Nothing -> do 
-                          case (B.head bytes) of
-                            0x24 -> readPacket msgQ state bytes
-                            _ -> readMessage msgQ state bytes
-                        Just msg -> readMessageBody msg msgQ state bytes
+        else do 
+          rval <- runMaybeT $ do 
+            case pending of
+              Nothing ->  case (B.head bytes) of
+                              0x24 -> readPacket msgQ state bytes
+                              _ -> readMessage msgQ state bytes
+              Just msg -> readMessageBody msg msgQ state bytes
+            
           case rval of 
             Just (remainder, state') -> process msgQ remainder state'
             Nothing -> return (bytes, state)
             
-    readPacket :: MsgQ -> ReaderState -> B.ByteString -> IO (Maybe (B.ByteString, ReaderState))
-    readPacket msgQ state bytes = do case Rtsp.embeddedPacket bytes of
-                                       Nothing -> return Nothing 
-                                       Just (packet, remainder) -> do 
-                                          postMessage (InboundPacket packet) msgQ
-                                          return $ Just (remainder, state)
-        
-    readMessage :: MsgQ -> ReaderState -> B.ByteString -> IO (Maybe (B.ByteString, ReaderState))
+    readPacket :: MsgQ -> ReaderState -> B.ByteString -> MaybeIO (B.ByteString, ReaderState)
+    readPacket msgQ state bytes = do
+      (packet, remainder) <- fromMaybe $ Rtsp.embeddedPacket bytes
+      liftIO $ postMessage (InboundPacket packet) msgQ
+      return (remainder, state)
+
+    readMessage :: MsgQ -> ReaderState -> B.ByteString -> MaybeIO (B.ByteString, ReaderState)
     readMessage msgQ state bytes = do 
-      case Rtsp.extractMessageBytes bytes of
-        Nothing -> return Nothing
-        Just (msg, remainder) -> do 
-            case (Rtsp.parseMessage msg) of 
-              Nothing -> do postMessage BadRequest msgQ
-                            return $ Just (remainder, state)
-                
-              Just msg -> do 
-                if Rtsp.msgContentLength msg > 0 
-                  then return $ Just (remainder, RS (Just msg))
-                  else do postMessage (InboundMsg msg Nothing) msgQ
-                          return $ Just (remainder, state)
+      (msg, remainder) <- fromMaybe $ Rtsp.extractMessageBytes bytes 
+      case (Rtsp.parseMessage msg) of 
+        Nothing -> do
+          liftIO $ postMessage BadRequest msgQ
+          return (remainder, state)
+          
+        Just msg -> do 
+          if Rtsp.msgContentLength msg > 0 
+            then return (remainder, RS (Just msg))
+            else do liftIO $ postMessage (InboundMsg msg Nothing) msgQ
+                    return (remainder, state)
       
-    readMessageBody :: Rtsp.Message -> MsgQ -> ReaderState -> B.ByteString -> IO (Maybe (B.ByteString, ReaderState))
+    readMessageBody :: Rtsp.Message -> MsgQ -> ReaderState -> B.ByteString -> MaybeIO (B.ByteString, ReaderState)
     readMessageBody msg msgQ state bytes = do 
       let contentLength = Rtsp.msgContentLength msg
       let available = B.length bytes
       case available >= contentLength of 
-        False -> return Nothing
+        False -> fail ""
         True -> do
           let (body, remainder) = B.splitAt contentLength bytes
-          postMessage (InboundMsg msg (Just body)) msgQ
+          liftIO $ postMessage (InboundMsg msg (Just body)) msgQ
           let state' = RS Nothing
-          return $ Just (remainder, state')
-                                    
+          return  (remainder, state')
+
+fromMaybe :: Maybe a -> MaybeIO a
+fromMaybe = MaybeT . return      

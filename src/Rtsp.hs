@@ -43,7 +43,7 @@ type Version = (Int, Int)
 data Message = Request Int Verb URI Version Headers Int
              | Response Int Status Headers
              
-data Packet = Packet Int B.ByteString
+data Packet = Packet Int B.ByteString deriving (Show)
   
 instance Show Message where 
   show (Request s v u _ _ _) = "#" ++ (show s) ++ " " ++ (show v) ++ " " ++ (show u) 
