@@ -10,6 +10,9 @@ import Control.Exception(Exception, catch, finally, bracket, try)
 import Data.Typeable
 import Network.Socket hiding (send, sendTo, recv, recvFrom)
 import Network.Socket.ByteString
+import qualified Data.ByteString as B
+
+import qualified Rtsp as Rtsp
 
 data ConnReply = OK
   deriving (Show)
@@ -17,6 +20,9 @@ data ConnReply = OK
 type ReplyVar = TMVar ConnReply
   
 data ConnMsg = Hello ReplyVar
+             | InboundMsg Rtsp.Message (Maybe B.ByteString)
+             | InboundPacket Rtsp.Packet
+             | BadRequest
 
 type MsgQ = TChan ConnMsg
 
@@ -38,12 +44,13 @@ new s maxData = do
   forkIO $ runConnection s maxData msgQ
   return (MkConn msgQ)
   
+-- | Defines a state block for the connection.
 data ConnState = State {
   readerThread :: !ThreadId
 }
 
 -- | The main connection thread. Spawns a reader thread and then starts handling all
---   of the messages sent to the connection 
+--   of the messages sent to the connection.
 runConnection :: Socket -> Int -> MsgQ -> IO ()
 runConnection s maxData msgQ = do
     tid <- forkIO $ reader s maxData msgQ
@@ -53,17 +60,93 @@ runConnection s maxData msgQ = do
     loop s q state = do
       msg <- atomically $ readTChan q
       case msg of 
-        Hello rpy -> do atomically $ putTMVar rpy OK
-                        loop s q state
+        Hello rpy -> do 
+          atomically $ putTMVar rpy OK
+          loop s q state
+                        
+        InboundMsg msg body -> do
+          state' <- processMessage msg body state
+          loop s q state'
+          
+        InboundPacket p -> loop s q state
+          
+        BadRequest -> do 
+          -- send bad request response and bail
+          return ()
 
-data ReaderState = RdState 
+processMessage :: Rtsp.Message -> Maybe B.ByteString -> ConnState -> IO ConnState
+processMessage msg body state = do
+  return state
+                        
+-- | Posts a message to the supplied message queue
+postMessage :: ConnMsg -> MsgQ -> IO ()
+postMessage msg q = atomically $ writeTChan q msg
+  
+-- | The state block for the reader thread
+data ReaderState = RS (Maybe Rtsp.Message)
 
+-- | The main reader loop. Reads data from the network, parses it and sends the
+--   parsed messages on to the connection manager thread
 reader :: Socket -> Int -> MsgQ -> IO ()
 reader s maxData q = do 
-    let state = RdState 
-    readLoop s maxData q state `catch` \(ExitReader rpy) -> atomically $ putTMVar rpy OK
+    let state = RS Nothing
+    readLoop s maxData (B.empty) q state `catch` 
+      \(ExitReader rpy) -> atomically $ putTMVar rpy OK
   where 
-    readLoop :: Socket -> Int -> MsgQ -> ReaderState -> IO ()
-    readLoop s maxData q state = do
-      recv s 1024
-      readLoop s maxData q state
+    readLoop :: Socket -> Int -> B.ByteString -> MsgQ -> ReaderState -> IO ()
+    readLoop s maxData pending q state = do
+      rdBuf <- recv s 512
+      let buffer = B.append pending $ rdBuf
+      (remainder, state') <- process q buffer state
+      readLoop s maxData remainder q state'
+      
+    process :: MsgQ -> B.ByteString -> ReaderState -> IO (B.ByteString, ReaderState)
+    process msgQ bytes state@(RS pending) = do
+      let available = B.length bytes
+      if available == 0 
+        then return (bytes, state)
+        else do
+          rval <- do case pending of 
+                        Nothing -> do 
+                          case (B.head bytes) of
+                            0x24 -> readPacket msgQ state bytes
+                            _ -> readMessage msgQ state bytes
+                        Just msg -> readMessageBody msg msgQ state bytes
+          case rval of 
+            Just (remainder, state') -> process msgQ remainder state'
+            Nothing -> return (bytes, state)
+            
+    readPacket :: MsgQ -> ReaderState -> B.ByteString -> IO (Maybe (B.ByteString, ReaderState))
+    readPacket msgQ state bytes = do case Rtsp.embeddedPacket bytes of
+                                       Nothing -> return Nothing 
+                                       Just (packet, remainder) -> do 
+                                          postMessage (InboundPacket packet) msgQ
+                                          return $ Just (remainder, state)
+        
+    readMessage :: MsgQ -> ReaderState -> B.ByteString -> IO (Maybe (B.ByteString, ReaderState))
+    readMessage msgQ state bytes = do 
+      case Rtsp.extractMessageBytes bytes of
+        Nothing -> return Nothing
+        Just (msg, remainder) -> do 
+            case (Rtsp.parseMessage msg) of 
+              Nothing -> do postMessage BadRequest msgQ
+                            return $ Just (remainder, state)
+                
+              Just msg -> do 
+                if Rtsp.msgContentLength msg > 0 
+                  then return $ Just (remainder, RS (Just msg))
+                  else do postMessage (InboundMsg msg Nothing) msgQ
+                          return $ Just (remainder, state)
+      
+    readMessageBody :: Rtsp.Message -> MsgQ -> ReaderState -> B.ByteString -> IO (Maybe (B.ByteString, ReaderState))
+    readMessageBody msg msgQ state bytes = do 
+      let contentLength = Rtsp.msgContentLength msg
+      let available = B.length bytes
+      case available >= contentLength of 
+        False -> return Nothing
+        True -> do
+          let (body, remainder) = B.splitAt contentLength bytes
+          postMessage (InboundMsg msg (Just body)) msgQ
+          let state' = RS Nothing
+          return $ Just (remainder, state')
+                                    
