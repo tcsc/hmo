@@ -19,7 +19,9 @@ module Rtsp (
 
 import Data.Binary.Strict.Get
 import Data.Binary.Put
+import qualified Data.Bimap as Bimap
 import Data.Char
+import Data.Either.Utils
 import Data.List
 import Data.Maybe
 import qualified Data.ByteString as B
@@ -37,13 +39,20 @@ import Headers
 data Status = OK
             | NotFound
             | InternalServerError
- deriving (Show, Eq)
+            | NotImplemented
+            | BadGateway
+            | ServiceUnavailable
+            | GatewayTimeout
+            | VersionNotSupported
+            | OptionNotSupported
+            | Unknown Int
+ deriving (Show, Eq, Ord)
 
 instance Enum Status where 
   toEnum = Rtsp.toEnum
   fromEnum = Rtsp.fromEnum
 
-data Verb = Describe | Announce | Setup | Play | Teardown
+data Verb = Describe | Announce | Setup | Play | Teardown | OtherVerb String
   deriving (Eq, Show)
 
 type Version = (Int, Int)
@@ -75,10 +84,15 @@ msgUpdate :: Int -> Headers -> Message -> Message
 msgUpdate s headers (Request _ verb uri ver _) = Request s verb uri ver headers
 msgUpdate s headers (Response _ status _) = Response s status headers  
 
+-- | 
 parseMessage :: B.ByteString -> Maybe Message
 parseMessage bytes = case parse message "" bytes of
                        Left _ -> Nothing
                        Right msg -> Just msg
+
+-- |
+--formatMessage :: Message -> B.ByteString
+--formatMessage msg = 
 
 message = do 
     msg <- (try request) <|> response  
@@ -122,6 +136,7 @@ verb = do
                "SETUP"    -> Setup
                "PLAY"     -> Play
                "TEARDOWN" -> Teardown
+               s -> OtherVerb text
   return verb 
   
 uri = do
@@ -200,19 +215,26 @@ formatPacket (Packet channel bytes) = (B.concat . L.toChunks) $ runPut $ do
   
 endOfMessage :: B.ByteString 
 endOfMessage = B.pack [13, 10, 13, 10] 
+
+statusMap = Bimap.fromList [ (200, OK),
+                             (404, NotFound),
+                             (500, InternalServerError), 
+                             (501, NotImplemented),
+                             (502, BadGateway),
+                             (503, ServiceUnavailable),
+                             (504, GatewayTimeout),
+                             (505, VersionNotSupported),
+                             (551, OptionNotSupported) ]
           
 toEnum :: Int -> Status
-toEnum n = case n of 
-             200 -> OK
-             404 -> NotFound
-             500 -> InternalServerError 
+toEnum n = case Bimap.lookup n statusMap of
+             Just s -> s
+             Nothing -> Unknown n
 
 fromEnum :: Status -> Int
-fromEnum s = case s of 
-               OK -> 200
-               NotFound -> 404
-               InternalServerError -> 500
-
+fromEnum (Unknown n) = n 
+fromEnum s = (Bimap.!>) statusMap s
+  
 -- ----------------------------------------------------------------------------
 -- Static data
 -- ----------------------------------------------------------------------------
@@ -234,6 +256,13 @@ testParseMinimalRequest = TestCase(do
   assertEqual "version" (1,0) ver
   assertEqual "contentLength" 0 (maybe 0 (id) (contentLength hdr)))
 
+testParseBadStatusResponse = TestCase(do 
+  let bytes = Utf8.fromString "RTSP/1.0 000 Not a valid status\r\nCSeq: 1\r\n\r\n"
+  let mmsg = parseMessage bytes
+  assertBool "Parse successs" (isJust mmsg)
+  let (Response sq status _) = fromJust mmsg
+  assertEqual "Status" (Unknown 0) status)
+
 testParsePacket = TestCase (do
   let bytes = B.pack [0x24, 0x01, 0x00, 0x05, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07]
   let mp = embeddedPacket bytes
@@ -248,19 +277,31 @@ testParsePacketNotEnoughData = TestCase (do
     let mp = embeddedPacket bytes
     assertBool "Parse failed" (isNothing mp))
   
-testParseVerb s v = 
-  case parse verb "" (Utf8.fromString s) of
-    Right verb -> (v == verb)
-    Left _ -> False
+testParseVerb s = fromRight $ parse verb "" (Utf8.fromString s) 
   
 testVerbs = TestList [
-  "Parse Describe" ~: testParseVerb "DESCRIBE" Describe ~=? True,
-  "Parse Announce" ~: testParseVerb "ANNOUNCE" Announce ~=? True,
-  "Parse Setup" ~: testParseVerb "SETUP" Setup ~=? True,
-  "Parse Play" ~: testParseVerb "PLAY" Play ~=? True,
-  "Parse Teardown" ~: testParseVerb "TEARDOWN" Teardown ~=? True  ]
+  "Parse Describe" ~: Describe         ~=? testParseVerb "DESCRIBE",
+  "Parse Announce" ~: Announce         ~=? testParseVerb "ANNOUNCE",
+  "Parse Setup"    ~: Setup            ~=? testParseVerb "SETUP",
+  "Parse Play"     ~: Play             ~=? testParseVerb "PLAY",
+  "Parse Teardown" ~: Teardown         ~=? testParseVerb "TEARDOWN",
+  "Other"          ~: OtherVerb "narf" ~=? testParseVerb "narf"]
+
+testStatusToEnum = TestList [
+  "OK"              ~: OK                  ~=? Rtsp.toEnum 200,
+  "Not Found"       ~: NotFound            ~=? Rtsp.toEnum 404,
+  "Error"           ~: InternalServerError ~=? Rtsp.toEnum 500,
+  "Not Implemented" ~: NotImplemented      ~=? Rtsp.toEnum 501,
+  "Bad Gateway"     ~: BadGateway          ~=? Rtsp.toEnum 502,
+  "Unavailable"     ~: ServiceUnavailable  ~=? Rtsp.toEnum 503,
+  "Gateway Timeout" ~: GatewayTimeout      ~=? Rtsp.toEnum 504,
+  "Unsupported Ver" ~: VersionNotSupported ~=? Rtsp.toEnum 505,
+  "Unsupported Opt" ~: OptionNotSupported  ~=? Rtsp.toEnum 551,
+  "Unknown"         ~: Unknown 0           ~=? Rtsp.toEnum 0]
 
 unitTests = TestList [TestLabel "Parse Minimal Request" testParseMinimalRequest,
+                      TestLabel "Parse Request - Bad Status" testParseBadStatusResponse,
                       TestLabel "Packet Parsing - simple" testParsePacket,
                       TestLabel "Packet Parsing - insuffcient data" testParsePacketNotEnoughData,
-                      testVerbs]
+                      testVerbs,
+                      testStatusToEnum]
