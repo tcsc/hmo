@@ -1,6 +1,7 @@
 module CaseInsensitiveString (
   CaseInsensitiveString, 
-  fromString, 
+  fromString,
+  asString, 
   unitTests
 ) where
 
@@ -19,6 +20,9 @@ instance Ord CaseInsensitiveString where
   
 fromString :: String -> CaseInsensitiveString
 fromString s = CIS s
+
+asString :: CaseInsensitiveString -> String
+asString (CIS s) = s
 
 -- ----------------------------------------------------------------------------
 -- Unit Tests
