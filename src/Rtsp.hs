@@ -137,7 +137,7 @@ verb = do
                "SETUP"    -> Setup
                "PLAY"     -> Play
                "TEARDOWN" -> Teardown
-               s -> OtherVerb text
+               s          -> OtherVerb text
   return verb 
   
 uri = do

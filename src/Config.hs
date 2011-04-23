@@ -2,7 +2,6 @@ module Config (
   Config(..),
   RtspConfig,
   loadConfig,
-  rtspConfig,
   rtspPorts,
   rtspCutoff
 ) where

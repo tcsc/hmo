@@ -91,14 +91,14 @@ stopThreadManager :: ThreadManager -> IO ()
 stopThreadManager (MkThreadMgr ctlQ) = do
   replyVar <- newEmptyTMVarIO
   atomically $ writeTChan ctlQ (Shutdown replyVar)
-  atomically $ readTMVar replyVar
+  atomically $ takeTMVar replyVar
   return ()
 
 -- | creates a new thread and waits for confirmation
 spawnThread :: ThreadManager -> ThreadMain -> CrashBehaviour -> IO (Either CtlError ThreadId)
 spawnThread mgr main crashBehaviour = do
   replyVar <- spawnThreadWithoutWaiting mgr main crashBehaviour
-  result <- atomically $ readTMVar replyVar
+  result <- atomically $ takeTMVar replyVar
   case result of
     Thread threadId -> return $ Right threadId
     Error err -> return $ Left err

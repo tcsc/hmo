@@ -21,6 +21,7 @@ import Network.Socket.ByteString
 import Test.HUnit(Test(..), assertBool, assertEqual)
 
 import qualified Rtsp as Rtsp
+import qualified Headers as Headers
 
 data ConnReply = OK
   deriving (Show)
@@ -60,7 +61,9 @@ new s maxData = do
 -- | Defines a state block for the connection.
 data ConnState = State {
   readerThread :: !ThreadId,
-  writerThread :: !ThreadId
+  writerThread :: !ThreadId,
+  writerReplyVar :: !(Maybe (TMVar ItemToSend)),
+  sendQueue :: ![ItemToSend]
 }
 
 -- | The main connection thread. Spawns a reader thread and then starts
@@ -69,7 +72,7 @@ runConnection :: Socket -> Int -> MsgQ -> IO ()
 runConnection s maxData msgQ = do
     readerTid <- forkIO $ reader s maxData msgQ
     writerTid <- forkIO $ writer s msgQ
-    loop s msgQ (State readerTid writerTid) `finally` sClose s
+    loop s msgQ (State readerTid writerTid Nothing []) `finally` sClose s
   where 
     loop :: Socket -> MsgQ -> ConnState -> IO ()
     loop s q state = do
@@ -86,19 +89,48 @@ runConnection s maxData msgQ = do
         InboundPacket p -> do 
           loop s q state
           
+        GetItemToSend rx -> do
+          state' <- getItemToSend rx state
+          loop s q state'
+          
         BadRequest -> do 
           -- send bad request response and bail
           return ()
 
+-- | Handles the receipt of a message and begins processing it
 processMessage :: Rtsp.Message -> Maybe B.ByteString -> ConnState -> IO ConnState
-processMessage msg body state = do
-  return state
+processMessage (Rtsp.Request sq verb uri version headers) body state = do
+  let r = Rtsp.Response sq Rtsp.NotImplemented Headers.empty 
+  putItemToSend (Message r Nothing) state
+
+-- | Puts an item in the send queue. Note that if the writer thread is waiting
+--   on something to send, this function will wake it up and pass the supplied 
+--   item directly to it, bypassing the queue.
+putItemToSend :: ItemToSend -> ConnState -> IO ConnState
+putItemToSend item state = do 
+  case writerReplyVar state of 
+    Nothing -> do let q' = item : (sendQueue state) 
+                  return state { sendQueue = q' } 
+    Just rx -> do atomically $ putTMVar rx item 
+                  return state { writerReplyVar = Nothing } 
+
+-- | Pulls an item from the send queue and puts it in the supplied return 
+--   envelope (a TMVar). If the send queue is empty, this function saves a
+--   reference to the TMVar so that it can be filled when data arrives
+getItemToSend :: TMVar ItemToSend -> ConnState -> IO ConnState
+getItemToSend rx state = do
+  case sendQueue state of 
+    -- nothing to send, store the reply slot for filling later on
+    [] -> return $ state { writerReplyVar = Just rx }
+    h:t -> do atomically $ putTMVar rx h
+              return $ state { sendQueue = t }
                         
 -- | Posts a message to the supplied message queue
 postMessage :: ConnMsg -> MsgQ -> IO ()
 postMessage msg q = atomically $ writeTChan q msg
   
--- | 
+-- | The main writer thread. Asks the conection thread for data to send, 
+--   formats it and then sends it out over the network.
 writer :: Socket -> MsgQ -> IO ()
 writer s msgQ = do
     receiver <- newEmptyTMVarIO
@@ -108,7 +140,7 @@ writer s msgQ = do
     writeLoop :: Socket -> MsgQ -> (TMVar ItemToSend) -> IO ()
     writeLoop s msgQ rx = do
       atomically $ writeTChan msgQ (GetItemToSend rx)
-      item <- atomically $ readTMVar rx
+      item <- atomically $ takeTMVar rx
       let bytes = format item
       send s bytes
       writeLoop s msgQ rx
@@ -119,7 +151,7 @@ writer s msgQ = do
       
 -- | The state block for the reader thread
 data ReaderState = RS (Maybe Rtsp.Message) Int
-
+  deriving (Show)
       
 -- | The main reader loop. Reads data from the network, parses it and sends the
 --   parsed messages on to the connection manager thread
@@ -136,6 +168,9 @@ reader s maxData q = do
       (remainder, state') <- process q buffer state
       readLoop s maxData remainder q state'
       
+-- | Recursively pulls data out of the processing buffer and acts on it as 
+--   necessary. Returns an updates state block and the remaining, unprocessed
+--   bytes.
 process :: MsgQ -> B.ByteString -> ReaderState -> IO (B.ByteString, ReaderState)
 process msgQ bytes state@(RS pending cLen)
   | B.length bytes == 0 = return (bytes, state)
@@ -179,6 +214,13 @@ process msgQ bytes state@(RS pending cLen)
 -- Unit tests
 -- ----------------------------------------------------------------------------
 
+testProcessMessage = TestCase (do 
+  let b = Utf8.fromString "SETUP rtsp://localhost/root/1 RTSP/1.0\r\nCSeq: 2\r\n\r\n"
+  let state = RS Nothing 0
+  q <- newTChanIO
+  (remainder, state') <- process q b state
+  assertEqual "Remander Size" 0 (B.length remainder))
+
 testProcessing = TestCase (do
   let bytes = B.concat [ Utf8.fromString "DESCRIBE rtsp://localhost/root/1 RTSP/1.0\r\nCSeq: 1\r\nContent-Length: 10\r\n\r\n",
                          B.pack [0, 1, 2, 3, 4, 5, 6, 7, 8, 9],
@@ -209,4 +251,4 @@ testProcessing = TestCase (do
     InboundMsg msg Nothing -> return()
     _ -> assertBool "Expected message with no body" False) 
   
-unitTests = TestList [testProcessing]
+unitTests = TestList [testProcessing, testProcessMessage]
