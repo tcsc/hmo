@@ -14,7 +14,7 @@ module Rtsp (
   msgSequence,
   msgHeaders,
   msgContentLength,
-  unitTests
+  Rtsp.unitTests
 ) where
 
 import Data.Binary.Strict.Get
@@ -23,6 +23,7 @@ import qualified Data.Bimap as Bimap
 import Data.Char
 import Data.Either.Utils
 import Data.List
+import qualified Data.Map as Map
 import Data.Maybe
 import qualified Data.ByteString as B
 import qualified Data.ByteString.Lazy as L
@@ -49,8 +50,8 @@ data Status = OK
  deriving (Show, Eq, Ord)
 
 instance Enum Status where 
-  toEnum = Rtsp.toEnum
-  fromEnum = Rtsp.fromEnum
+  toEnum = Rtsp.toStatus
+  fromEnum = fromStatus
 
 data Verb = Describe | Announce | Setup | Play | Teardown | OtherVerb String
   deriving (Eq, Show)
@@ -90,9 +91,9 @@ parseMessage bytes = case parse message "" bytes of
                        Left _ -> Nothing
                        Right msg -> Just msg
 
--- |
---formatMessage :: Message -> B.ByteString
---formatMessage msg = 
+-- ----------------------------------------------------------------------------
+--  RTSP parser
+-- ----------------------------------------------------------------------------
 
 message = do 
     msg <- (try request) <|> response  
@@ -172,7 +173,7 @@ header = do
 status = do
   t <- many1 digit
   let i = read t :: Int
-  return $ Rtsp.toEnum i
+  return $ Rtsp.toStatus i
 
 endOfLine = do
    try (string "\r\n") 
@@ -202,9 +203,41 @@ extractMessageBytes s =
   in case (endOfMessage `B.isSuffixOf` h) of
     True -> Just (h, t)
     False -> Nothing
-  
+
+toStatus :: Int -> Status
+toStatus n = case Bimap.lookup n statusMap of
+             Just s -> s
+             Nothing -> Unknown n
+
+fromStatus :: Status -> Int
+fromStatus (Unknown n) = n 
+fromStatus s = (Bimap.!>) statusMap s
+
+-- ----------------------------------------------------------------------------
+-- RTSP formatter
+-- ----------------------------------------------------------------------------
+
 formatMessage :: Message -> Maybe B.ByteString -> B.ByteString
 formatMessage (Request s v uri ver hs) _ = B.empty
+formatMessage (Response sq status hs) body = 
+  let responseLine = B.concat $ intersperse (Utf8.fromString " ") [
+                                             Utf8.fromString "RTSP/1.0",
+                                             (Utf8.fromString . show . fromStatus) status, 
+                                             statusText status]
+      headers = formatHeaders $ setSpecialHeaders sq body hs
+      bodyBytes = maybe B.empty (id) body
+      chunks = [responseLine, eol, headers, eol, eol, bodyBytes]
+  in B.concat chunks
+
+setSpecialHeaders :: Int -> Maybe B.ByteString -> Headers -> Headers
+setSpecialHeaders sq body hs = 
+  let hs' = setHeader hdrSequence (show sq) hs
+  in maybe hs' (\b -> setHeader hdrContentLength (show $ B.length b) hs') body
+
+formatHeaders :: Headers -> B.ByteString
+formatHeaders hs = let fmt = \(h,v) -> Utf8.fromString (h ++ ": " ++ v)
+                       hdrs = reverse $ Headers.fold (\hdr acc -> (fmt hdr) : acc) [] hs
+                   in B.concat $ intersperse eol hdrs
 
 formatPacket :: Packet -> B.ByteString
 formatPacket (Packet channel bytes) = (B.concat . L.toChunks) $ runPut $ do 
@@ -212,10 +245,37 @@ formatPacket (Packet channel bytes) = (B.concat . L.toChunks) $ runPut $ do
   putWord8 (fromIntegral channel)
   putWord16be (fromIntegral (B.length bytes))
   putByteString bytes
-  
-endOfMessage :: B.ByteString 
-endOfMessage = B.pack [13, 10, 13, 10] 
 
+statusText :: Status -> Utf8.ByteString
+statusText s = 
+  case Map.lookup s statusDescriptions of
+    Just t -> t
+    Nothing -> (Utf8.fromString . show . fromStatus) s
+
+-- ----------------------------------------------------------------------------
+-- Static data
+-- ----------------------------------------------------------------------------
+
+endOfMessage :: B.ByteString 
+endOfMessage = B.concat [eol, eol] 
+
+eol :: B.ByteString 
+eol = B.pack [13, 10]
+
+hdrSequence = "CSeq"
+hdrContentLength = "Content-Length"
+
+statusDescriptions = Map.fromList $ map (\(s,t) -> (s, Utf8.fromString t)) [ 
+                        (OK,                  "OK"),
+                        (NotFound,            "Not Found"),
+                        (InternalServerError, "Internal Server Error"), 
+                        (NotImplemented,      "Not Implemented"),
+                        (BadGateway,          "Bad Gateway"),
+                        (ServiceUnavailable,  "Service Unavailable"),
+                        (GatewayTimeout,      "Gateway Timeout"),
+                        (VersionNotSupported, "RTSP Version Not Supported"),
+                        (OptionNotSupported,  "Option Not Supported") ]
+ 
 statusMap = Bimap.fromList [ (200, OK),
                              (404, NotFound),
                              (500, InternalServerError), 
@@ -225,23 +285,7 @@ statusMap = Bimap.fromList [ (200, OK),
                              (504, GatewayTimeout),
                              (505, VersionNotSupported),
                              (551, OptionNotSupported) ]
-          
-toEnum :: Int -> Status
-toEnum n = case Bimap.lookup n statusMap of
-             Just s -> s
-             Nothing -> Unknown n
 
-fromEnum :: Status -> Int
-fromEnum (Unknown n) = n 
-fromEnum s = (Bimap.!>) statusMap s
-  
--- ----------------------------------------------------------------------------
--- Static data
--- ----------------------------------------------------------------------------
-
-hdrSequence = "CSeq"
-hdrContentLength = "Content-Length"
- 
 -- ----------------------------------------------------------------------------
 -- Unit tests
 -- ----------------------------------------------------------------------------
@@ -255,6 +299,16 @@ testParseMinimalRequest = TestCase(do
   assertEqual "verb" Describe verb
   assertEqual "version" (1,0) ver
   assertEqual "contentLength" 0 (maybe 0 (id) (contentLength hdr)))
+
+testFormatMinimalResponse = TestCase(do
+  let response = Response 42 NotImplemented Headers.empty
+  let expected = (Utf8.fromString "RTSP/1.0 501 Not Implemented\r\nCSeq: 42\r\n\r\n")
+  assertEqual "Formatted Message" expected (formatMessage response Nothing)) 
+
+testFormatResponseWithBody = TestCase(do
+  let response = Response 1702 OK Headers.empty
+  let expected = (Utf8.fromString "RTSP/1.0 200 OK\r\nCSeq: 1702\r\nContent-Length: 12\r\n\r\nHello, World")
+  assertEqual "Formatted Message" expected (formatMessage response (Just $ Utf8.fromString "Hello, World"))) 
 
 testParseBadStatusResponse = TestCase(do 
   let bytes = Utf8.fromString "RTSP/1.0 000 Not a valid status\r\nCSeq: 1\r\n\r\n"
@@ -288,18 +342,20 @@ testVerbs = TestList [
   "Other"          ~: OtherVerb "narf" ~=? testParseVerb "narf"]
 
 testStatusToEnum = TestList [
-  "OK"              ~: OK                  ~=? Rtsp.toEnum 200,
-  "Not Found"       ~: NotFound            ~=? Rtsp.toEnum 404,
-  "Error"           ~: InternalServerError ~=? Rtsp.toEnum 500,
-  "Not Implemented" ~: NotImplemented      ~=? Rtsp.toEnum 501,
-  "Bad Gateway"     ~: BadGateway          ~=? Rtsp.toEnum 502,
-  "Unavailable"     ~: ServiceUnavailable  ~=? Rtsp.toEnum 503,
-  "Gateway Timeout" ~: GatewayTimeout      ~=? Rtsp.toEnum 504,
-  "Unsupported Ver" ~: VersionNotSupported ~=? Rtsp.toEnum 505,
-  "Unsupported Opt" ~: OptionNotSupported  ~=? Rtsp.toEnum 551,
-  "Unknown"         ~: Unknown 0           ~=? Rtsp.toEnum 0]
+  "OK"              ~: OK                  ~=? Rtsp.toStatus 200,
+  "Not Found"       ~: NotFound            ~=? Rtsp.toStatus 404,
+  "Error"           ~: InternalServerError ~=? Rtsp.toStatus 500,
+  "Not Implemented" ~: NotImplemented      ~=? Rtsp.toStatus 501,
+  "Bad Gateway"     ~: BadGateway          ~=? Rtsp.toStatus 502,
+  "Unavailable"     ~: ServiceUnavailable  ~=? Rtsp.toStatus 503,
+  "Gateway Timeout" ~: GatewayTimeout      ~=? Rtsp.toStatus 504,
+  "Unsupported Ver" ~: VersionNotSupported ~=? Rtsp.toStatus 505,
+  "Unsupported Opt" ~: OptionNotSupported  ~=? Rtsp.toStatus 551,
+  "Unknown"         ~: Unknown 0           ~=? Rtsp.toStatus 0]
 
 unitTests = TestList [TestLabel "Parse Minimal Request" testParseMinimalRequest,
+                      TestLabel "Format Minimal Response" testFormatMinimalResponse,
+                      TestLabel "Format Body Response" testFormatResponseWithBody,
                       TestLabel "Parse Request - Bad Status" testParseBadStatusResponse,
                       TestLabel "Packet Parsing - simple" testParsePacket,
                       TestLabel "Packet Parsing - insuffcient data" testParsePacketNotEnoughData,
