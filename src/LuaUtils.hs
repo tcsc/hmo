@@ -1,7 +1,45 @@
-module LuaUtils(mapTable, bracketField, bracketGlobal, bracketStack) where
-  
-import Scripting.Lua
+module LuaUtils(
+  ScriptResult,
+  mapTable, 
+  bracketField, 
+  bracketGlobal, 
+  bracketStack,
+  loadFile) where
+
 import Control.Exception
+import Control.Monad.Error  
+import Scripting.Lua
+
+type ScriptResult a = ErrorT String IO a
+
+exec :: LuaState -> IO Int -> ScriptResult ()
+exec lua f = do 
+  rval <- liftIO f
+  case rval of 
+    0 -> return ()
+    _ -> getError lua
+
+execChain :: LuaState -> IO Int -> ScriptResult a -> ScriptResult a
+execChain lua f fnext = do 
+  rval <- liftIO $ f
+  case rval of 
+    0 -> fnext
+    _ -> getError lua
+
+getError :: LuaState -> ScriptResult a
+getError lua = do 
+  err <- liftIO $ peek lua (-1)
+  let errText = case err of
+                  Just s -> s
+                  Nothing -> "Unexpected error"
+  liftIO $ pop lua 1
+  fail errText
+  
+-- | Loads a lua file into the supplied lua state, executes it andreports any 
+--   syntax or execution errors
+loadFile :: LuaState -> String -> ScriptResult ()
+loadFile lua fileName =  execChain lua (loadfile lua fileName) 
+                                       (exec lua (call lua 0 0))
 
 -- | Maps the values of a Lua table into a list using the supplied function.
 --   Assumes that the table of interest is on the top of the Lua Interface 
