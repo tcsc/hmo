@@ -1,11 +1,13 @@
 module Config (
   Config(..),
   RtspConfig,
+  LuaU.ScriptResult,
   loadConfig,
   rtspPorts,
   rtspCutoff
 ) where
 
+import Control.Monad.Error
 import Control.Exception
 import Control.Monad.Error
 import Data.Either
@@ -13,7 +15,7 @@ import Data.Word
 import qualified Scripting.Lua as Lua  
 import System.Log.Logger
 
-import LuaUtils
+import qualified LuaUtils as LuaU
 
 data Config = Config {
   rtspConfig :: !RtspConfig
@@ -24,45 +26,31 @@ data RtspConfig = RTSP {
   rtspCutoff :: !Int  
 } deriving (Show)
 
-loadConfig :: String -> IO (Either String Config)
-loadConfig filename = bracket (Lua.newstate) 
+loadConfig :: String -> LuaU.ScriptResult Config
+loadConfig filename = do 
+  rVal <- liftIO $ do bracket (Lua.newstate) 
                               (Lua.close) 
-                              (getConfig filename)
-  where
-    getConfig :: String -> Lua.LuaState -> IO (Either String Config)
-    getConfig fileName lua = do 
-      infoLog ("Loading config script: " ++ fileName)
-      Lua.openlibs lua
-      execLua lua (\l -> Lua.loadfile l filename) execConfig
-        
-    execConfig :: Lua.LuaState -> IO (Either String Config)
-    execConfig lua = do
-      execLua lua (\l -> do infoLog "Executing config script"
-                            Lua.call l 0 0) 
-                  readConfig
-                  
-    execLua :: Lua.LuaState -> (Lua.LuaState -> IO Int) -> 
-                               (Lua.LuaState -> IO (Either String a)) -> 
-                               IO (Either String a)
-    execLua lua f fnext = do 
-      rval <- f lua
-      case rval of 
-        0 -> fnext lua
-        _ -> do err <- Lua.peek lua (-1)
-                let errText = case err of
-                                Just s -> s
-                                Nothing -> "Unexpected error"
-                return (Left errText)
+                              (\lua -> runErrorT $ getConfig lua filename)
+  case rVal of
+    Left s -> fail s
+    Right cfg -> return cfg
+                              
+getConfig :: Lua.LuaState -> String -> LuaU.ScriptResult Config
+getConfig lua fileName = do 
+  liftIO $ do infoLog ("Loading configuration script \"" ++ fileName ++ "\"")
+              Lua.openlibs lua
+  LuaU.loadFile lua fileName
+  readConfig lua
 
-readConfig :: Lua.LuaState -> IO (Either String Config)
-readConfig lua  = do 
-  rtsp <- readRtspConfig lua
+readConfig :: Lua.LuaState -> LuaU.ScriptResult Config
+readConfig lua = do 
+  rtsp <- liftIO $ readRtspConfig lua
   case rtsp of 
-    Nothing -> return $ Left "No RTSP config"
-    Just rtspCfg -> return $ Right (Config rtspCfg)
+    Nothing -> fail "Must supply an RTSP configuration"
+    Just rtspCfg -> return (Config rtspCfg)
 
 readRtspConfig :: Lua.LuaState -> IO (Maybe RtspConfig)
-readRtspConfig lua = bracketGlobal lua "rtsp" readRtsp
+readRtspConfig lua = LuaU.bracketGlobal lua "rtsp" readRtsp
   where 
     readRtsp :: Lua.LuaState -> IO (Maybe RtspConfig)
     readRtsp lua = do
@@ -70,18 +58,18 @@ readRtspConfig lua = bracketGlobal lua "rtsp" readRtsp
       case t of
         False -> return Nothing 
         True -> do 
-          ports <- bracketField lua "ports" readPortTable
-          cutoff <- bracketField lua "cutoff" (\l -> do x <- Lua.peek l (-1)
-                                                        case x of 
-                                                          Just n -> return n
-                                                          Nothing -> return 1024 )
+          ports <- LuaU.bracketField lua "ports" readPortTable
+          cutoff <- LuaU.bracketField lua "cutoff" (\l -> do x <- Lua.peek l (-1)
+                                                             case x of 
+                                                               Just n -> return n
+                                                               Nothing -> return 1024 )
           return $ Just (RTSP ports cutoff)
         
 readPortTable :: Lua.LuaState -> IO [Word16]
 readPortTable lua = do 
    t <- Lua.istable lua (-1)
    case t of
-     True -> mapTable lua ((\x -> fromIntegral x) :: Lua.LuaInteger -> Word16)
+     True -> LuaU.mapTable lua ((\x -> fromIntegral x) :: Lua.LuaInteger -> Word16)
      False -> return []
         
 debugLog :: String -> IO ()

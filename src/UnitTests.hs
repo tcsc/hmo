@@ -7,10 +7,12 @@ import Headers
 import Multimap
 import Rtsp
 import RtspConnection
+import SessionManager
 
 allTests = TestList [
   CaseInsensitiveString.unitTests,
   Headers.unitTests,
   Multimap.unitTests,
   Rtsp.unitTests, 
-  RtspConnection.unitTests]
+  RtspConnection.unitTests,
+  SessionManager.unitTests]

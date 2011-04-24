@@ -28,11 +28,11 @@ import System.Log.Logger
 import System.Log.Handler.Simple
 
 import Config
+import ScriptManager
 import TcpListener
 import RtspConnection
 
 data Msg = Interrupt
-
 type MsgQ = TChan Msg 
 
 main :: IO ()
@@ -40,11 +40,17 @@ main = do
     q <- newTChanIO
     setLogger
     infoLog "Loading configuration"
-    cfg <- loadConfig "config.lua"
     
-    case cfg of 
-      Left err -> infoLog ("Configuration failed: " ++ err)
-      Right config -> do 
+    initR <- runErrorT $ do 
+      cfg <- loadConfig "config.lua"
+      script <- ScriptManager.new "authentication.lua"
+      return (cfg, script)
+      
+    case initR of 
+      Left err -> do infoLog err
+                     infoLog "exiting"
+                     
+      Right (config, scripting) -> do 
         infoLog "Installing interrupt signal handler"
         installHandler sigINT (Catch $ interrupt q) Nothing
 
