@@ -42,12 +42,12 @@ main = do
     infoLog "Loading configuration"
     
     initR <- runErrorT $ do 
-      cfg <- loadConfig "config.lua"
+      cfg <- translateIO $ loadConfig "config.lua"
       script <- ScriptManager.new "authentication.lua"
       return (cfg, script)
       
     case initR of 
-      Left err -> do infoLog err
+      Left err -> do logError err
                      infoLog "exiting"
                      
       Right (config, scripting) -> do 
@@ -79,6 +79,14 @@ main = do
       case msg of 
         Interrupt -> return () 
       
+logError :: ScriptError -> IO ()
+logError err = do
+  let msg = case err of
+              SyntaxError s ->  "script syntax error: " ++ s
+              RuntimeError s -> "script runtime error: " ++ s
+  errorLog msg
+              
+      
 -- | Handles an interrupt signal from the system and sends a signal to the main
 --   thread to exit
 interrupt :: MsgQ -> IO ()
@@ -107,6 +115,9 @@ split delim as = unfoldr (split' delim) as
       let (h, t) = span (/= d) s 
       in Just (h, drop 1 t) 
       
+errorLog :: String -> IO ()
+errorLog = errorM "main"
+ 
 debugLog :: String -> IO ()
 debugLog = debugM "main"
 
