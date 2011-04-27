@@ -1,5 +1,3 @@
-{-# LANGUAGE ForeignFunctionInterface #-}
-
 module LuaUtils(
   LuaResult,
   LuaResultIO,
