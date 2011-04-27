@@ -1,11 +1,11 @@
-module ScriptManager(
-  ScriptManager,
+module ScriptExecutor(
+  ScriptExecutor,
   ScriptResult,
   ScriptResultIO,
   ScriptError(..),
   new,
   translateIO,
-  ScriptManager.unitTests
+  ScriptExecutor.unitTests
 ) where
 
 import Control.Exception
@@ -42,13 +42,13 @@ type ScriptReplyVar a = TMVar (ScriptResult (Maybe a))
 data ScriptAction = GetUserInfo String (ScriptReplyVar UserInfo)
                   | GetMountPoint String (ScriptReplyVar MountPoint)
 
-data ScriptManager = SM MsgQ
+data ScriptExecutor = SM MsgQ
 data ExecState = S [ScriptAction]
 
 -- ----------------------------------------------------------------------------
 --
 -- ----------------------------------------------------------------------------
-new :: String -> ScriptResultIO ScriptManager
+new :: String -> ScriptResultIO ScriptExecutor
 new fileName = do 
   lua <- liftIO $ do l <- Lua.newstate
                      Lua.openlibs l
@@ -62,7 +62,7 @@ new fileName = do
               t <- forkIO $ executerThread lua q
               return (SM q)
               
-queryUser :: ScriptManager -> String -> ScriptResultIO (Maybe UserInfo)
+queryUser :: ScriptExecutor -> String -> ScriptResultIO (Maybe UserInfo)
 queryUser (SM q) userName = do
   reply <- liftIO $ do replyVar <- newEmptyTMVarIO
                        atomically $ writeTChan q $ Execute (GetUserInfo userName replyVar)
@@ -142,8 +142,8 @@ translate x =
 translateError :: LuaError -> ScriptError
 translateError e =
   case e of 
-    LuaUtils.RuntimeError s -> ScriptManager.RuntimeError s
-    LuaUtils.RuntimeError s -> ScriptManager.RuntimeError s
+    LuaUtils.RuntimeError s -> ScriptExecutor.RuntimeError s
+    LuaUtils.RuntimeError s -> ScriptExecutor.RuntimeError s
     NotFound s -> ScriptNotFound s
     
 debugLog :: String -> IO ()

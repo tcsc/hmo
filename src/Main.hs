@@ -28,7 +28,7 @@ import System.Log.Logger
 import System.Log.Handler.Simple
 
 import Config
-import ScriptManager
+import ScriptExecutor
 import TcpListener
 import RtspConnection
 
@@ -43,7 +43,7 @@ main = do
     
     initR <- runErrorT $ do 
       cfg <- translateIO $ loadConfig "config.lua"
-      script <- ScriptManager.new "authentication.lua"
+      script <- ScriptExecutor.new "authentication.lua"
       return (cfg, script)
       
     case initR of 
