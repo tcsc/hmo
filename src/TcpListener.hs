@@ -25,7 +25,6 @@ import Control.Exception(bracket, bracketOnError, catch, finally)
 import Network
 import Network.BSD
 import Network.Socket as Socket
-import System.Event
 import System.Log.Logger
 
 import ThreadManager
