@@ -23,7 +23,6 @@ import Data.Word
 import IO
 import Network.Socket
 import qualified Scripting.Lua as Lua
-import System.Posix.Signals 
 import System.Log.Logger
 import System.Log.Handler.Simple
 
@@ -31,6 +30,7 @@ import Config
 import ScriptExecutor
 import TcpListener
 import RtspConnection
+import Signals
 
 data Msg = Interrupt
 type MsgQ = TChan Msg 
@@ -52,7 +52,7 @@ main = do
                      
       Right (config, scripting) -> do 
         infoLog "Installing interrupt signal handler"
-        installHandler sigINT (Catch $ interrupt q) Nothing
+        installInterruptHandler (interrupt q)
 
         infoLog "Creating TCP listener"        
         listener <- newListener

@@ -137,8 +137,6 @@ translate x =
     Left e -> Left $ translateError e
     Right a -> Right a
   
-  --either (Left . translateError) (Right) x
-      
 translateError :: LuaError -> ScriptError
 translateError e =
   case e of 
