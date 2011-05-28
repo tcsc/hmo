@@ -18,6 +18,7 @@ module WorkerPool(WorkerPool,
                   WorkerSetup,
                   WorkerTeardown,
                   MessageHandler,
+                  MessageReply (..),
                   call,
                   callWithTimeout,
                   post,
@@ -32,23 +33,14 @@ import Data.Maybe
 import System.Timeout(timeout)
 import System.Log.Logger
 
--- | Defines an "operation complete" signal as well as providing a mechanism
---   where a message handler can return a result to the original caler
-type ReplyVar reply = TMVar reply
+import WorkerTypes
 
 -- | Defines a set of messages used for iternal communication between the
 --   Manager thread and the worker threads
 data MgrMsg = Exit
             | ThreadExit ThreadId (Maybe SomeException)
 
--- | Defines a set of messages that the worker threads can process, including
---   a conduit for the threads' actal IPC messages
-data WkrMsg msg reply = ExitWorker
-                      | Handle msg
-                      | HandleAndReply msg (ReplyVar reply)
-
 type MgrQ = TChan MgrMsg
-type WkrQ msg reply = TChan (WkrMsg msg reply)
 
 -- | Defines a function that sets up a worker thread. Use this to initialise any
 --   thread - specific data (e.g. database handles, etc) if necessary
@@ -61,7 +53,7 @@ type WorkerTeardown state = state -> IO ()
 type MessageHandler msg   -- ^ The range of possible messages
                     reply -- ^ The range of possible replies
                     state -- ^ An opaque per-thread state block for the owner
-                    = msg -> state -> IO ((Maybe reply), state)
+                    = msg -> state -> IO (MessageReply reply, state)
 
 -- | A collection of callback functions used to manage setup, teardown and
 --   drive the worker process
@@ -135,9 +127,6 @@ mgrThreadMain nThreads mgrQ wkrQ handlers = do
               newTid <- forkWorker mgrQ wkrQ (poolFuns state)
               loop mgrQ wkrQ $ state { poolThreads = newTid : tids }
 
-        -- Unknown message. Ignore.
-        _ -> loop mgrQ wkrQ state
-
 -- | Forks off a worker thread that will handle messages from the worker queue
 --   and process them, posting a message back to the manager thread when it
 --   exits for whatever reason
@@ -188,8 +177,11 @@ post (MkWorkerPool _ wkrQ) msg = atomically $
 
 -- | Forces the evaluation of the reply and sends it back to the caller via
 --   the supplied ReplyVar
-sendReply :: ReplyVar reply -> Maybe reply -> IO ()
-sendReply replyVar reply = atomically $ putTMVar replyVar $! fromJust reply
+sendReply :: ReplyVar reply -> MessageReply reply -> IO ()
+sendReply replyVar reply = do 
+  case reply of 
+    NoReply -> return ()
+    Reply r -> atomically $ putTMVar replyVar $! r
 
 newReplyVar :: IO (ReplyVar reply)
 newReplyVar = newEmptyTMVarIO

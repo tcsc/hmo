@@ -13,6 +13,7 @@ module LuaUtils(
   loadFile,
   loadField,
   number,
+  boolean,
   peekValue,
   pushValue,
   string,
@@ -111,6 +112,10 @@ maybeString _ = Nothing
 number :: LuaValue -> Maybe LuaNumber
 number (LNum n) = Just n
 number _ = Nothing
+
+boolean :: LuaValue -> Maybe Bool
+boolean (LBool b) = Just b
+boolean _ = Nothing
 
 pushValue :: LuaState -> LuaValue -> IO ()
 pushValue lua (LBool b)   = pushboolean lua b
