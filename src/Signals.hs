@@ -17,6 +17,8 @@ installInterruptHandler h = do
                      ControlC -> do f
                      _ -> return ()
 #else
-installInterruptHandler h = installHandler sigINT (Catch h) Nothing
+installInterruptHandler h = do 
+  installHandler sigINT (Catch h) Nothing
+  return ()
 #endif
 

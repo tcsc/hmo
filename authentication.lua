@@ -23,8 +23,6 @@ rights = {
 -- Utility functions
 -- ----------------------------------------------------------------------------
 
-
-
 mapUsers = function (uids)
   local result = {}
   local idx = 0
@@ -116,9 +114,10 @@ scripts = {
     end
     
     return {
-      id = pointId, 
-      name = point.name, 
-      description = point.description
+      id          = pointId, 
+      name        = point.name, 
+      description = point.description,
+      enabled     = point.enabled
     }
   end,
   

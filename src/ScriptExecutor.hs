@@ -5,6 +5,8 @@ module ScriptExecutor(
   ScriptError(..),
   new,
   translateIO,
+  queryMountPoint,
+  queryUserRights,
   ScriptExecutor.unitTests
 ) where
 
@@ -17,7 +19,8 @@ import System.Log.Logger
 import Test.HUnit
 
 import LuaUtils
-import UserInfo
+import ScriptTypes
+import Flags
 
 data ScriptError = SyntaxError String
                  | RuntimeError String
@@ -37,16 +40,30 @@ data Msg = Execute ScriptAction
          | RunJobs
 type MsgQ = TChan Msg 
 
-type ScriptReplyVar a = TMVar (ScriptResult (Maybe a))
+type ScriptReplyVar a = TMVar (ScriptResult a)
 
-data ScriptAction = GetUserInfo String (ScriptReplyVar UserInfo)
-                  | GetMountPoint String (ScriptReplyVar MountPoint)
+data ScriptAction = GetUserInfo String (ScriptReplyVar LuaValue)
+                  | GetMountPoint String (ScriptReplyVar LuaValue)
+                  | GetUserRights Int Int (ScriptReplyVar LuaValue)
 
 data ScriptExecutor = SM MsgQ
 data ExecState = S [ScriptAction]
 
+-- | A function that knows how to convert something representated as a Lua value
+--   into a haskell data type. 
+type Parser a = LuaValue -> Maybe a
+
 -- ----------------------------------------------------------------------------
+-- The script executor is single-threaded at the moment, and runs on a dispatch
+-- queue of jobs. Be careful, as a badly-written script can bollocks the entire
+-- thing.
 --
+-- Future options to get around this include allowing the scripts to run as
+-- coroutines so they can suspend themselves when they're blocked and allow
+-- others to run, or having multiple script executors sharing some common data.
+--
+-- Not sure what the best approach is, but as the scripts are glorified config
+-- files at the moment it doesn't really matter either way.
 -- ----------------------------------------------------------------------------
 new :: String -> ScriptResultIO ScriptExecutor
 new fileName = do 
@@ -61,16 +78,41 @@ new fileName = do
               q <- newTChanIO
               t <- forkIO $ executerThread lua q
               return (SM q)
-              
+
 queryUser :: ScriptExecutor -> String -> ScriptResultIO (Maybe UserInfo)
-queryUser (SM q) userName = do
-  reply <- liftIO $ do replyVar <- newEmptyTMVarIO
-                       atomically $ writeTChan q $ Execute (GetUserInfo userName replyVar)
-                       atomically $ takeTMVar replyVar
-  case reply of
-    Right x -> return x
+queryUser s userName = do
+  replyVar <- liftIO newEmptyTMVarIO
+  callAndParseResult s (GetUserInfo userName replyVar) replyVar parseUserInfo
+  
+queryMountPoint :: ScriptExecutor -> String -> ScriptResultIO (Maybe MountPoint)
+queryMountPoint s path = do 
+  replyVar <- liftIO newEmptyTMVarIO
+  callAndParseResult s (GetMountPoint path replyVar) replyVar parseMountPoint
+
+queryUserRights :: ScriptExecutor -> Int -> Int -> ScriptResultIO UserRights
+queryUserRights s uid mountPoint = do
+  replyVar <- liftIO newEmptyTMVarIO
+  let action = GetUserRights uid mountPoint replyVar
+  rights <- callAndParseResult s action replyVar parseRights
+  return $ maybe [] id rights  
+
+callAndParseResult :: ScriptExecutor -> ScriptAction -> ScriptReplyVar LuaValue -> Parser a -> ScriptResultIO (Maybe a)
+callAndParseResult s action replyVar parseResult = do
+  val <- call s action replyVar
+  case val of 
+    LNil -> return Nothing  
+    _ ->  case parseResult val of 
+            Just r -> return $ Just r
+            Nothing -> throwError BadResponse 
+
+call :: ScriptExecutor -> ScriptAction -> ScriptReplyVar LuaValue -> ScriptResultIO LuaValue
+call (SM q) action replyVar = do
+  v <- liftIO $ do atomically $ writeTChan q $ Execute action
+                   atomically $ takeTMVar replyVar
+  case v of 
     Left e -> throwError e
-    
+    Right x -> return x  
+
 executerThread :: Lua.LuaState -> MsgQ -> IO ()
 executerThread lua msgQ = loop lua msgQ (S [])
   where 
@@ -86,6 +128,32 @@ executerThread lua msgQ = loop lua msgQ (S [])
           state' <- runJobs lua msgQ state 
           loop lua msgQ state'
           
+-- | Handles a request to run a script by working out which script to run,
+--   invoking it, parsing the response and feeting that response back to the
+--   caller
+executeScript :: Lua.LuaState -> ScriptAction -> MsgQ -> ExecState -> IO ExecState 
+executeScript lua script msgQ state = do
+  case script of 
+    GetUserInfo userName rpy ->
+      runAndReply lua "getUserInfo" [LString userName] rpy
+
+    GetMountPoint path rpy ->
+      runAndReply lua "getMountPoint" [LString path] rpy
+  return state
+
+-- | Executes a script with the supplied arguments, extracts & parses the
+--   response and feeds the result back to the caller.
+runAndReply :: Lua.LuaState -> String -> [LuaValue] -> ScriptReplyVar LuaValue -> IO ()
+runAndReply lua s args rpy = do 
+    rval <- runErrorT $ runAndCollectResult lua s args
+    atomically $ putTMVar rpy rval
+    return ()
+  where     
+    runAndCollectResult :: Lua.LuaState -> String -> [LuaValue] -> ScriptResultIO LuaValue
+    runAndCollectResult lua script args = do
+      results <- translateIO $ runScript lua script args 1
+      return $ head results 
+        
 runScript :: Lua.LuaState -> String -> [LuaValue] -> Int -> LuaResultIO [LuaValue]
 runScript lua script args results =
   bracketGlobal lua "scripts" (do
@@ -94,33 +162,27 @@ runScript lua script args results =
     exec lua (Lua.call lua (length args) results)
     liftIO $ collectResults lua results)
 
-executeScript :: Lua.LuaState -> ScriptAction -> MsgQ -> ExecState -> IO ExecState 
-executeScript lua script msgQ state = do
-  case script of 
-    GetUserInfo userName rpy -> do
-      rval <- runErrorT $ do
-        results <- translateIO $ runScript lua "getUserInfo" [LString userName] 1
-        case head results of 
-          LNil -> return Nothing
-          LTable t -> case parseUserInfo t of
-                        Just u -> return $ Just u
-                        Nothing -> throwError BadResponse
-          _ ->  throwError BadResponse
-      atomically $ putTMVar rpy rval
-      return state
-      
---    GetMountPoint path rpy ->
---      rval <- runErrorT $ runScript lua "getMountPoint" [LString path] 1
---      atomically $ putTVar rpy rval
---      return state    
-
-parseUserInfo :: LuaTable -> Maybe UserInfo
-parseUserInfo t = do 
+parseUserInfo :: LuaValue -> Maybe UserInfo
+parseUserInfo (LTable t) = do
   uid  <- tableField (LString "id") t    >>= number
   name <- tableField (LString "login") t >>= string
   pwd  <- tableField (LString "pwd") t   >>= maybeString
-  return $ User (truncate uid) name pwd  
-      
+  return $ User (truncate uid) name pwd
+parseUserInfo _ = Nothing
+  
+parseMountPoint :: LuaValue -> Maybe MountPoint
+parseMountPoint (LTable t) = do 
+  mpid        <- tableField (LString "id") t          >>= number
+  name        <- tableField (LString "name") t        >>= string 
+  description <- tableField (LString "description") t >>= string
+  enabled     <- tableField (LString "enabled") t     >>= boolean
+  return $ MountPoint (truncate mpid) name description enabled
+parseMountPoint _ = Nothing
+
+parseRights :: LuaValue -> Maybe UserRights
+parseRights (LNum n) = Just $ enumerateFlags (truncate n)
+parseRights _ = Nothing  
+
 runJobs :: Lua.LuaState -> MsgQ -> ExecState -> IO ExecState 
 runJobs lua msgQ state = return state
 
@@ -141,7 +203,6 @@ translateError :: LuaError -> ScriptError
 translateError e =
   case e of 
     LuaUtils.RuntimeError s -> ScriptExecutor.RuntimeError s
-    LuaUtils.RuntimeError s -> ScriptExecutor.RuntimeError s
     NotFound s -> ScriptNotFound s
     
 debugLog :: String -> IO ()
@@ -149,6 +210,7 @@ debugLog = debugM "script"
 
 infoLog :: String -> IO ()
 infoLog = infoM "script"
+
 
 -- ----------------------------------------------------------------------------
 -- Unit Tests
