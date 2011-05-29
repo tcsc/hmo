@@ -43,6 +43,11 @@ call (Svc q) msg = do
   atomically $ writeTChan q (Execute msg replyVar)   
   atomically $ takeTMVar replyVar
   
+cast :: Service msg rpy state -> msg -> IO ()
+cast (Svc q) msg = do
+  replyVar <- newEmptyTMVarIO
+  atomically $ writeTChan q (Execute msg replyVar)   
+  
 serverThread :: WorkerSetup s -> MessageHandler msg rpy s -> WorkerTeardown s -> SvcQ msg rpy -> IO ()
 serverThread setup handler teardown msgq = bracket (setup) (teardown) (loop msgq handler)
   where
