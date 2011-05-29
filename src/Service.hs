@@ -16,7 +16,8 @@ import System.Log.Logger
 
 import WorkerTypes
 
-data SvcMsg msg rpy = Execute msg (ReplyVar rpy)
+data SvcMsg msg rpy = Call msg (ReplyVar rpy)
+                    | Cast msg
                     | ExitSvc (ReplyVar ())
 
 type SvcQ msg rpy = TChan (SvcMsg msg rpy)
@@ -40,13 +41,13 @@ stopService (Svc q) = do
 call :: Service msg rpy state -> msg -> IO rpy
 call (Svc q) msg = do
   replyVar <- newEmptyTMVarIO
-  atomically $ writeTChan q (Execute msg replyVar)   
+  atomically $ writeTChan q (Call msg replyVar)   
   atomically $ takeTMVar replyVar
   
 cast :: Service msg rpy state -> msg -> IO ()
 cast (Svc q) msg = do
   replyVar <- newEmptyTMVarIO
-  atomically $ writeTChan q (Execute msg replyVar)   
+  atomically $ writeTChan q (Cast msg)   
   
 serverThread :: WorkerSetup s -> MessageHandler msg rpy s -> WorkerTeardown s -> SvcQ msg rpy -> IO ()
 serverThread setup handler teardown msgq = bracket (setup) (teardown) (loop msgq handler)
@@ -59,7 +60,11 @@ serverThread setup handler teardown msgq = bracket (setup) (teardown) (loop msgq
           atomically $ putTMVar rpyVar ()
           return ()
           
-        Execute msg rpyVar -> do
+        Cast msg -> do
+          (_, state') <- hdlr msg state
+          loop q hdlr state'
+          
+        Call msg rpyVar -> do
           (reply, state') <- hdlr msg state
           atomically $ putTMVar rpyVar reply 
           loop q hdlr state'

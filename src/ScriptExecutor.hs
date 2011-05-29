@@ -76,18 +76,26 @@ new fileName = do
   liftIO $ do infoLog $ "Starting script executor"
               svc <- newService (return lua) handleCall (Lua.close)
               return (SM svc)
-  
+
+-- | Looks up the user information and returns it to the caller 
+--
 queryUser :: ScriptExecutor -> String -> ScriptResultIO (Maybe UserInfo)
 queryUser se userName = callAndParseResult se (GetUserInfo userName) parseUserInfo
   
+-- | Looks up information about a mount point and returns it to the caller
+--
 queryMountPoint :: ScriptExecutor -> String -> ScriptResultIO (Maybe MountPoint)
 queryMountPoint se path = callAndParseResult se (GetMountPoint path) parseMountPoint
 
-queryUserRights :: ScriptExecutor -> Int -> Int -> ScriptResultIO UserRights
-queryUserRights se uid mountPointId = do
+-- | Looks up a user's rights for a given mount point 
+--
+queryUserRights :: ScriptExecutor -> UserId -> Int -> ScriptResultIO UserRights
+queryUserRights se (UserId uid _) mountPointId = do
   rights <- callAndParseResult se (GetUserRights uid mountPointId) parseRights
   return $ maybe [] id rights  
 
+-- | Calls the script executor service and translates the response into whatever
+--   type the caller requested
 callAndParseResult :: ScriptExecutor -> ScriptAction -> Parser a -> ScriptResultIO (Maybe a)
 callAndParseResult (SM svc) action parseResult = do
   reply <- liftIO $ call svc action
@@ -99,11 +107,18 @@ callAndParseResult (SM svc) action parseResult = do
         _ -> case parseResult value of 
                Just r -> return $ Just r
                Nothing -> throwError BadResponse 
-            
+
+-- | Handles the callback from the underlying service, executes the appropriate
+--   script and returns the semi-parsed lua response to the caller for further
+--   parsing.
 handleCall :: ScriptAction -> Lua.LuaState -> IO (Rpy, Lua.LuaState)
-handleCall (GetUserInfo userName) lua = run lua "getUserInfo" [LString userName]   
-handleCall (GetMountPoint path) lua = run lua "getMountPoint" [LString path]
-  
+handleCall (GetUserInfo userName) lua   = run lua "getUserInfo" [LString userName]   
+handleCall (GetMountPoint path) lua     = run lua "getMountPoint" [LString path]
+handleCall (GetUserRights uId mpId) lua = run lua "getUserRights" [LNum (fromIntegral mpId), LNum (fromIntegral uId)]
+
+-- | Executes the stated script, collects the result from the Lua runtime 
+--   (assuming a single value) and wraps it in a LuaValue type and returns it
+--   to the caller
 run :: Lua.LuaState -> String -> [LuaValue] -> IO (Rpy, Lua.LuaState)
 run lua scriptName args = do 
     rval <- runErrorT $ runAndCollectResult lua scriptName args
@@ -114,6 +129,7 @@ run lua scriptName args = do
       results <- translateIO $ runScript lua script args 1
       return $ head results 
 
+-- | 
 runScript :: Lua.LuaState -> String -> [LuaValue] -> Int -> LuaResultIO [LuaValue]
 runScript lua script args results =
   bracketGlobal lua "scripts" (do
@@ -122,6 +138,7 @@ runScript lua script args results =
     exec lua (Lua.call lua (length args) results)
     liftIO $ collectResults lua results)
 
+-- | Parses a lua table as a 
 parseUserInfo :: LuaValue -> Maybe UserInfo
 parseUserInfo (LTable t) = do
   uid  <- tableField (LString "id") t    >>= number
