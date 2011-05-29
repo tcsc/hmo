@@ -15,8 +15,6 @@ import ScriptTypes
 import WorkerPool
 import WorkerTypes
 
-data UserId = UserId Int String
-
 data SessionError = NotFound
                   | AlreadyExists
                   | InternalError
@@ -76,17 +74,6 @@ translateScriptIO x = do
     Right a -> return a
 
 handleMsg :: ScriptExecutor -> SessionDatabase -> Msg -> IO Rpy
-
-{- 
-look up mount point
-see if user has rights to it
-create freeze-dried session (i.e. data but no active threads)
-see if there's a registered session already 
-  if yes - back out and return AlreadyExists
-  if no - register freze-dried session
-          start session running
-          return new session
--}
 handleMsg scripts db (CreateSession path desc uid) = do
   result <- runErrorT $ do
     (mountPoint, rights) <- getInfo scripts path uid
@@ -98,7 +85,7 @@ handleMsg scripts db (CreateSession path desc uid) = do
               Right _ -> OK
 
 getInfo :: ScriptExecutor -> String -> UserId -> SessionResultIO (MountPoint, UserRights)
-getInfo scripts path (UserId uid _) = do
+getInfo scripts path uid = do
     info <- queryInfo
     case info of
       Just x -> return x
@@ -111,9 +98,10 @@ getInfo scripts path (UserId uid _) = do
           rights <- getUserRights scripts uid mp 
           return $ Just (mp, rights)
         Nothing -> return Nothing
-         
-getUserRights scripts uid mp = 
-  queryUserRights scripts uid (mountPointId mp)
+
+    getUserRights :: ScriptExecutor -> UserId -> MountPoint -> ScriptResultIO UserRights
+    getUserRights scripts uid mp = 
+      queryUserRights scripts uid (mountPointId mp)
 
 -- ----------------------------------------------------------------------------
 -- Logging

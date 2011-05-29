@@ -1,4 +1,5 @@
 module ScriptTypes (
+  UserId (..),
   UserInfo (..),
   MountPoint (..),
   UserRight (..),
@@ -6,6 +7,8 @@ module ScriptTypes (
 ) where
     
 import Data.Bits
+
+data UserId = UserId Int String
 
 data UserInfo = User { 
   userId :: !Int,
