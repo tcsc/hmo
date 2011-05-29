@@ -21,7 +21,6 @@ module WorkerPool(WorkerPool,
                   MessageReply (..),
                   call,
                   callWithTimeout,
-                  post,
                   newWorkerPool,
                   stopWorkerPool) where
 
@@ -41,19 +40,6 @@ data MgrMsg = Exit
             | ThreadExit ThreadId (Maybe SomeException)
 
 type MgrQ = TChan MgrMsg
-
--- | Defines a function that sets up a worker thread. Use this to initialise any
---   thread - specific data (e.g. database handles, etc) if necessary
-type WorkerSetup state = IO state
-
--- | Defines a function for tearing down resources created during thread startup
-type WorkerTeardown state = state -> IO ()
-
--- | Defines a function type that the worker pool uses to handle messages
-type MessageHandler msg   -- ^ The range of possible messages
-                    reply -- ^ The range of possible replies
-                    state -- ^ An opaque per-thread state block for the owner
-                    = msg -> state -> IO (MessageReply reply, state)
 
 -- | A collection of callback functions used to manage setup, teardown and
 --   drive the worker process
@@ -110,6 +96,7 @@ mgrThreadMain nThreads mgrQ wkrQ handlers = do
       msg <- atomically $ readTChan mgrQ
       case msg of
         Exit -> do
+          
           atomically $ mapM (\_ -> writeTChan wkrQ ExitWorker) [1..nThreads]
           loop mgrQ wkrQ state
 
@@ -144,10 +131,7 @@ forkWorker mgrQ wkrQ funs = forkIO $ tryWorker mgrQ wkrQ funs
     loop mgrQ wkrQ handler state = do
       msg <- atomically $ readTChan wkrQ
       case msg of
-        Handle m -> do
-          (_, state') <- handler m state
-          loop mgrQ wkrQ handler state'
-        HandleAndReply m r -> do
+        HandleMsg m r -> do
           (reply, state') <- handler m state
           sendReply r reply
           loop mgrQ wkrQ handler state'
@@ -156,7 +140,7 @@ forkWorker mgrQ wkrQ funs = forkIO $ tryWorker mgrQ wkrQ funs
 call :: WorkerPool msg reply -> msg -> IO reply
 call (MkWorkerPool _ wkrQ) msg = do
   replyVar <- newReplyVar
-  atomically $ writeTChan wkrQ $! HandleAndReply msg replyVar
+  atomically $ writeTChan wkrQ $! HandleMsg msg replyVar
   atomically $ takeTMVar replyVar
 
 -- | Posts a message to the worker queue and waits - up to a given timeout - for
@@ -164,24 +148,16 @@ call (MkWorkerPool _ wkrQ) msg = do
 callWithTimeout :: WorkerPool msg reply -> msg -> Int -> WorkerResultIO reply
 callWithTimeout (MkWorkerPool _ wkrQ) msg t = do
   replyVar <- newReplyVar
-  atomically $ writeTChan wkrQ $! HandleAndReply msg replyVar
+  atomically $ writeTChan wkrQ $! HandleMsg msg replyVar
   result <- timeout t $ atomically $ takeTMVar replyVar
   case result of
     Just rpy -> return $ Right rpy
     Nothing -> return $ Left Timeout
 
--- | Posts a message to the worker pool and does not await a reply
-post :: WorkerPool msg reply -> msg -> IO ()
-post (MkWorkerPool _ wkrQ) msg = atomically $
-  writeTChan wkrQ $! Handle msg
-
 -- | Forces the evaluation of the reply and sends it back to the caller via
 --   the supplied ReplyVar
-sendReply :: ReplyVar reply -> MessageReply reply -> IO ()
-sendReply replyVar reply = do 
-  case reply of 
-    NoReply -> return ()
-    Reply r -> atomically $ putTMVar replyVar $! r
+sendReply :: ReplyVar reply -> reply -> IO ()
+sendReply replyVar reply = atomically $ putTMVar replyVar $! reply
 
 newReplyVar :: IO (ReplyVar reply)
 newReplyVar = newEmptyTMVarIO

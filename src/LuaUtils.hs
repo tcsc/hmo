@@ -28,6 +28,8 @@ import Scripting.Lua
 import qualified Data.Map as Map
 import Test.HUnit
 
+import System.Log.Logger
+
 type LuaTable = Map.Map LuaValue LuaValue
 
 data LuaValue = LString String
@@ -46,6 +48,7 @@ data LuaError = SyntaxError String
               | RuntimeError String
               | NotFound String
               | UntypedError String
+              deriving(Eq, Show)
                  
 instance Error LuaError where
    noMsg    = UntypedError "A script error"
@@ -83,7 +86,8 @@ loadFile :: LuaState -> String -> LuaResultIO ()
 loadFile lua fileName = do
   rl <- liftIO $ loadfile lua fileName
   case rl of 
-    0 -> exec lua (call lua 0 0)
+    0 -> do 
+      exec lua (call lua 0 0)
     _ -> getError lua SyntaxError
                                        
 peekValue :: LuaState -> Int -> IO LuaValue 
@@ -215,7 +219,14 @@ bracketGlobal lua name action =
     isNil <- liftIO $ isnil lua (-1)
     if isNil then throwError (NotFound name)
              else action)
-      
+
+
+debugLog :: String -> IO ()
+debugLog = debugM "lua"
+
+infoLog :: String -> IO ()
+infoLog = infoM "lua"
+
 -- ----------------------------------------------------------------------------
 -- Unit Tests
 -- ----------------------------------------------------------------------------
