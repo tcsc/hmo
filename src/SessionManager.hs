@@ -58,9 +58,10 @@ new executor nThreads = do
     teardown :: () -> IO ()
     teardown _ = return ()
 
-    call :: ScriptExecutor -> SessionDatabase -> Msg -> () -> IO (MessageReply Rpy, ())
-    call scripts sessionDb msg _ = 
-      handleMsg scripts sessionDb msg >>= \rpy -> return (rpy, ())
+    call :: ScriptExecutor -> SessionDatabase -> Msg -> () -> IO (Rpy, ())
+    call scripts sessionDb msg _ = do
+      rpy <- handleMsg scripts sessionDb msg 
+      return (rpy, ())
 
 stopSessionManager :: SessionManager -> IO ()
 stopSessionManager (SM _ pool) = do
@@ -74,7 +75,7 @@ translateScriptIO x = do
     Left _ -> throwError InternalError
     Right a -> return a
 
-handleMsg :: ScriptExecutor -> SessionDatabase -> Msg -> IO (MessageReply Rpy)
+handleMsg :: ScriptExecutor -> SessionDatabase -> Msg -> IO Rpy
 
 {- 
 look up mount point
@@ -92,10 +93,9 @@ handleMsg scripts db (CreateSession path desc uid) = do
     if Broadcast `elem` rights
       then return ()
       else throwError Unauthorised 
-  let rpy = case result of 
+  return $ case result of 
               Left err -> Error err
               Right _ -> OK
-  return (Reply rpy)
 
 getInfo :: ScriptExecutor -> String -> UserId -> SessionResultIO (MountPoint, UserRights)
 getInfo scripts path (UserId uid _) = do

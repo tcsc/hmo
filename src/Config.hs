@@ -30,7 +30,7 @@ loadConfig :: String -> LuaResultIO Config
 loadConfig filename = do 
   rVal <- liftIO $ do bracket (Lua.newstate) 
                               (Lua.close) 
-                              (\lua -> runErrorT $ getConfig lua filename)
+                              (\lua -> do { Lua.openlibs lua; runErrorT $ getConfig lua filename })
   case rVal of
     Left s -> throwError s
     Right cfg -> return cfg

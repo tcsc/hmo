@@ -2,7 +2,10 @@ module WorkerTypes (
   ReplyVar (..),
   WkrMsg (..),
   WkrQ,
-  MessageReply (..)
+  MessageReply (..),
+  WorkerSetup,
+  WorkerTeardown,
+  MessageHandler
 ) where 
 
 import Control.Concurrent.STM
@@ -13,9 +16,8 @@ type ReplyVar reply = TMVar reply
 
 -- | Defines a set of messages that the worker threads can process, including
 --   a conduit for the threads' actal IPC messages
-data WkrMsg msg reply = ExitWorker
-                      | Handle msg
-                      | HandleAndReply msg (ReplyVar reply)
+data WkrMsg msg reply = ExitWorker 
+                      | HandleMsg msg (ReplyVar reply)
 
 -- | 
 type WkrQ msg reply = TChan (WkrMsg msg reply)
@@ -48,4 +50,4 @@ type WorkerTeardown state = state -> IO ()
 type MessageHandler msg   -- ^ The range of possible messages
                     reply -- ^ The range of possible replies
                     state -- ^ An opaque per-thread state block for the owner
-                    = msg -> state -> IO (MessageReply reply, state)
+                    = msg -> state -> IO (reply, state)
