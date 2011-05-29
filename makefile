@@ -3,7 +3,7 @@ OBJ = obj
 HC = ghc
 BIN = bin
 OUT = $(BIN)/hmo
-OPTS = -XDeriveDataTypeable -XScopedTypeVariables -package hslua -threaded
+OPTS = -threaded
 SRCS = $(wildcard $(SRC)/*.hs)
 
 $(OUT): $(BIN) $(OBJ) $(SRCS) 

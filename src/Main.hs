@@ -102,7 +102,7 @@ setLogger = do
 -- |
 bindRtsp :: TcpListener -> Word16 -> Int -> IO ()
 bindRtsp listener port cutoff = do 
-  bind listener AF_INET iNADDR_ANY (PortNum port) 
+  bind listener AF_INET iNADDR_ANY (fromIntegral port) 
        (\s -> do { RtspConnection.new s cutoff; return (); } )
   return ()
 
