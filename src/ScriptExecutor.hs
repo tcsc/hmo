@@ -1,3 +1,5 @@
+{-# LANGUAGE DeriveDataTypeable  #-}
+
 module ScriptExecutor(
   ScriptExecutor,
   ScriptResult,
@@ -5,6 +7,7 @@ module ScriptExecutor(
   ScriptError(..),
   new,
   translateIO,
+  queryUser,
   queryMountPoint,
   queryUserRights,
   ScriptExecutor.unitTests
@@ -14,6 +17,7 @@ import Control.Exception
 import Control.Monad.Error
 import Control.Concurrent
 import Control.Concurrent.STM
+import Data.Typeable
 import qualified Scripting.Lua as Lua  
 import System.Log.Logger
 import Test.HUnit
@@ -28,11 +32,14 @@ data ScriptError = SyntaxError String
                  | ScriptNotFound String
                  | BadResponse
                  | UndefinedError String
-                 deriving (Show, Eq)
+                 deriving (Show, Eq, Typeable)
 
 instance Error ScriptError where
   noMsg    = UndefinedError "A script manager error"
   strMsg s = UndefinedError s
+
+instance Exception ScriptError 
+  
 
 type ScriptResult a = Either ScriptError a 
 type ScriptResultIO a = ErrorT ScriptError IO a 
@@ -74,7 +81,7 @@ new fileName = do
                         throwError e
 
   liftIO $ do infoLog $ "Starting script executor"
-              svc <- newService (return lua) handleCall (Lua.close)
+              svc <- newService (\_ -> return lua) handleCall (Lua.close)
               return (SM svc)
 
 -- | Looks up the user information and returns it to the caller 

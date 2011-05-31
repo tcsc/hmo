@@ -35,7 +35,7 @@ import Text.Parsec
 import Text.Parsec.Char
 
 import qualified Multimap as MM
-import Headers
+import qualified Headers as Headers
 
 data Status = OK
             | NotFound
@@ -58,8 +58,8 @@ data Verb = Describe | Announce | Setup | Play | Teardown | OtherVerb String
 
 type Version = (Int, Int)
 
-data Message = Request Int Verb URI Version Headers
-             | Response Int Status Headers
+data Message = Request Int Verb URI Version Headers.Headers
+             | Response Int Status Headers.Headers
              
 data Packet = Packet Int B.ByteString deriving (Show)
   
@@ -72,7 +72,7 @@ msgSequence :: Message -> Int
 msgSequence (Request s _ _ _ _ ) = s 
 msgSequence (Response s _ _) = s 
 
-msgHeaders :: Message -> Headers
+msgHeaders :: Message -> Headers.Headers
 msgHeaders (Request _ _ _ _ hs) = hs 
 msgHeaders (Response _ _ hs) = hs 
 
@@ -81,7 +81,7 @@ msgContentLength (Request _ _ _ _ hs) = maybe 0 id (contentLength hs)
 msgContentLength (Response _ _ _) = 0 
 
 -- | Fills in the missing bits of a half-parsed message once we know what they are
-msgUpdate :: Int -> Headers -> Message -> Message
+msgUpdate :: Int -> Headers.Headers -> Message -> Message
 msgUpdate s headers (Request _ verb uri ver _) = Request s verb uri ver headers
 msgUpdate s headers (Response _ status _) = Response s status headers  
 
@@ -104,13 +104,13 @@ message = do
             Nothing -> fail "Missing sequence number"
     return $ msgUpdate sq h msg
   where
-    readSequence :: Headers -> Maybe Int
+    readSequence :: Headers.Headers -> Maybe Int
     readSequence hs = do 
-      s <- getHeader "cseq" hs
+      s <- Headers.get "cseq" hs
       maybeInt s
       
-contentLength :: Headers -> Maybe Int
-contentLength hs = case (getHeader "content-length" hs) of
+contentLength :: Headers.Headers -> Maybe Int
+contentLength hs = case (Headers.get "content-length" hs) of
                      Nothing -> Nothing
                      Just txt -> maybeInt txt
       
@@ -120,14 +120,14 @@ request = do
   u <- uri
   spaces
   ver <- version
-  return $ Request (-1) v u ver empty
+  return $ Request (-1) v u ver Headers.empty
 
 response = do
   ver <- version
   spaces  
   s <- status
   many (noneOf ['\r','\n']) 
-  return $ Response (-1) s empty
+  return $ Response (-1) s Headers.empty
   
 verb = do 
   text <- many1 letter
@@ -162,7 +162,7 @@ version = do
 -- | 
 headers = do
   hs <- manyTill header endOfLine
-  return $ foldl' (\acc (n, v) -> setHeader n v acc) (Headers.empty) hs
+  return $ foldl' (\acc (n, v) -> Headers.set n v acc) (Headers.empty) hs
   
 header = do 
   n <- manyTill anyChar (char ':')
@@ -229,12 +229,12 @@ formatMessage (Response sq status hs) body =
       chunks = [responseLine, eol, headers, eol, eol, bodyBytes]
   in B.concat chunks
 
-setSpecialHeaders :: Int -> Maybe B.ByteString -> Headers -> Headers
+setSpecialHeaders :: Int -> Maybe B.ByteString -> Headers.Headers -> Headers.Headers
 setSpecialHeaders sq body hs = 
-  let hs' = setHeader hdrSequence (show sq) hs
-  in maybe hs' (\b -> setHeader hdrContentLength (show $ B.length b) hs') body
+  let hs' = Headers.set hdrSequence (show sq) hs
+  in maybe hs' (\b -> Headers.set hdrContentLength (show $ B.length b) hs') body
 
-formatHeaders :: Headers -> B.ByteString
+formatHeaders :: Headers.Headers -> B.ByteString
 formatHeaders hs = let fmt = \(h,v) -> Utf8.fromString (h ++ ": " ++ v)
                        hdrs = reverse $ Headers.fold (\hdr acc -> (fmt hdr) : acc) [] hs
                    in B.concat $ intersperse eol hdrs
