@@ -2,7 +2,8 @@ module Service(
   Service,
   newService,
   stopService,
-  call
+  call,
+  post
 ) 
 where 
   
@@ -22,15 +23,32 @@ data SvcMsg msg rpy = Call msg (ReplyVar rpy)
 
 type SvcQ msg rpy = TChan (SvcMsg msg rpy)
 
-data Service msg rpy state = Svc (SvcQ msg rpy)  
+data Service msg rpy state = Svc (SvcQ msg rpy)
+
+-- | Defines a function that sets up a worker thread. Use this to initialise any
+--   thread - specific data (e.g. database handles, etc) if necessary
+type ServiceSetup msg rpy state = Service msg rpy state -> IO state
+
+-- | Defines a function for tearing down resources created during thread startup
+type ServiceTeardown state = state -> IO ()
+
+-- | Defines a function type that the worker pool uses to handle messages
+type ServiceHandler msg   -- ^ The range of possible messages
+                    reply -- ^ The range of possible replies
+                    state -- ^ An opaque per-thread state block for the owner
+                    = msg -> state -> IO (reply, state)
+
 
 -- | An erlang-style service framework
 
-newService :: WorkerSetup state -> MessageHandler msg rpy state -> WorkerTeardown state -> IO (Service msg rpy state)
+newService :: ServiceSetup msg rpy state -> 
+              ServiceHandler msg rpy state -> 
+              ServiceTeardown state -> IO (Service msg rpy state)
 newService setup handler teardown = do
   q <- newTChanIO
-  forkIO $ serverThread setup handler teardown q
-  return $ Svc q
+  let svc = Svc q
+  forkIO $ serverThread (setup svc) handler teardown q
+  return svc
   
 stopService :: Service msg rpy state -> IO ()
 stopService (Svc q) = do
@@ -44,8 +62,8 @@ call (Svc q) msg = do
   atomically $ writeTChan q (Call msg replyVar)   
   atomically $ takeTMVar replyVar
   
-cast :: Service msg rpy state -> msg -> IO ()
-cast (Svc q) msg = do
+post :: Service msg rpy state -> msg -> IO ()
+post (Svc q) msg = do
   replyVar <- newEmptyTMVarIO
   atomically $ writeTChan q (Cast msg)   
   

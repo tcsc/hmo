@@ -3,7 +3,8 @@ module ScriptTypes (
   UserInfo (..),
   MountPoint (..),
   UserRight (..),
-  UserRights
+  UserRights,
+  fromUserInfo
 ) where
     
 import Data.Bits
@@ -40,3 +41,6 @@ instance Bounded UserRight where
   maxBound = Broadcast
 
 type UserRights = [UserRight]
+
+fromUserInfo :: UserInfo -> UserId
+fromUserInfo (User userId userLogin _) = UserId userId userLogin 

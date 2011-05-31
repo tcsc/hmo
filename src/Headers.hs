@@ -1,8 +1,8 @@
 module Headers(Headers,
                empty,
-               getHeader,
+               get,
                getHeaders,
-               setHeader,
+               set,
                fold,
                Headers.unitTests) 
 where 
@@ -21,14 +21,14 @@ fromList :: [(String,String)] -> Headers
 fromList hs = HS $ MM.fromList $ map (\(h,v) -> (fromString h, v)) hs
   
 -- | Fetches a single header value from a header collection
-getHeader :: String -> Headers -> Maybe String
-getHeader h hs = case getHeaders h hs of
-                   Just [] -> Nothing
-                   Just hs -> Just $ head hs
-                   Nothing -> Nothing
-                   
-setHeader :: String -> String -> Headers -> Headers
-setHeader n v (HS mmap) = HS $ MM.insert (fromString n) v mmap 
+get :: String -> Headers -> Maybe String
+get h hs = case getHeaders h hs of
+             Just [] -> Nothing
+             Just hs -> Just $ head hs
+             Nothing -> Nothing
+                
+set :: String -> String -> Headers -> Headers
+set n v (HS mmap) = HS $ MM.insert (fromString n) v mmap 
   
 -- | Fetches a set of header values from a header collection
 getHeaders :: String -> Headers -> Maybe [String]
