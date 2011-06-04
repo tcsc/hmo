@@ -36,6 +36,7 @@ import Text.Parsec.Char
 
 import qualified Multimap as MM
 import qualified Headers as Headers
+import Parsec
 
 data Status = OK
             | NotFound
@@ -77,7 +78,7 @@ msgHeaders (Request _ _ _ _ hs) = hs
 msgHeaders (Response _ _ hs) = hs 
 
 msgContentLength :: Message -> Int
-msgContentLength (Request _ _ _ _ hs) = maybe 0 id (contentLength hs)
+msgContentLength (Request _ _ _ _ hs) = maybe 0 fromIntegral (contentLength hs)
 msgContentLength (Response _ _ _) = 0 
 
 -- | Fills in the missing bits of a half-parsed message once we know what they are
@@ -100,16 +101,16 @@ message = do
     endOfLine
     h <- headers
     sq <- case readSequence h of 
-            Just n -> return n
+            Just n -> return (fromIntegral n)
             Nothing -> fail "Missing sequence number"
     return $ msgUpdate sq h msg
   where
-    readSequence :: Headers.Headers -> Maybe Int
+    readSequence :: Headers.Headers -> Maybe Integer
     readSequence hs = do 
       s <- Headers.get "cseq" hs
       maybeInt s
       
-contentLength :: Headers.Headers -> Maybe Int
+contentLength :: Headers.Headers -> Maybe Integer
 contentLength hs = case (Headers.get "content-length" hs) of
                      Nothing -> Nothing
                      Just txt -> maybeInt txt
@@ -140,24 +141,13 @@ verb = do
                s          -> OtherVerb text
   return verb 
   
-uri = do
-  s <- manyTill anyChar space
-  case parseURI s of 
-    Just uri -> return uri
-    Nothing -> fail "Uri"
-  
-integer = do
-  t <- many1 digit
-  case maybeInt t of 
-    Just n -> return n
-    Nothing -> fail "Integer"
     
 version = do 
   string ("RTSP/")
   major <- integer
   char '.'
   minor <- integer
-  return (major, minor) 
+  return (fromIntegral major, fromIntegral minor) 
 
 -- | 
 headers = do
@@ -179,10 +169,6 @@ endOfLine = do
    try (string "\r\n") 
           <|> string "\r"
           <|> string "\n"
-
-maybeInt s = case (reads s :: [(Int, String)]) of
-               [] -> Nothing
-               [(n, _)] -> Just n
 
 embeddedPacket :: B.ByteString -> Maybe (Packet, B.ByteString)
 embeddedPacket bytes = case runGet getPacket bytes of
