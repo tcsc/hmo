@@ -6,6 +6,7 @@ import qualified Data.ByteString as B
 import Data.Bits
 import Data.Char
 import Data.List
+import qualified Data.Map as Map
 import Data.Either.Utils
 import Data.Maybe
 import Numeric
@@ -35,6 +36,20 @@ data Protocol = Udp | Rtp | SecureRtp | Other String
 
 data BandwidthMode = ConfidenceTotal | ApplicationSpecific | UnknownBw String
                      deriving (Eq, Show)
+                     
+data RtpParams = RtpParams { 
+                   rtpFormat   :: !Int,
+                   rtpEncoding :: !String,
+                   rtpClock    :: !Integer,
+                   rtpParams   :: !String
+                } deriving (Eq, Show)
+
+data MediaStream = Stream {
+                    streamType :: !MediaType,
+                    streamPorts :: ![Int],
+                    streamProtocol :: !Protocol,
+                    streamFormats :: ![Int]
+                  } deriving (Eq, Show)
 
 data SdpLine = Version Integer
              | Originator String Integer Integer Family Address
@@ -47,18 +62,51 @@ data SdpLine = Version Integer
              | Bandwidth BandwidthMode Int
              | Timing Integer Integer
              | RepeatTiming Integer Integer [Integer]
-             | Media MediaType [Int] Protocol [Int]
-             | RtpMap Int String Int String
-             | FormatP Int String
+             | Media MediaStream -- MediaType [Int] Protocol [Int]
+             | RtpP RtpParams
+             | FmtP Int String
              | Attribute String
-             deriving(Show, Eq)
-             
-data SessionDescription = SD 
+             deriving (Show, Eq)
+
+
+type RtpMap = Map.Map Int RtpParams
+
+type FmtMap = Map.Map Int String
+
+data SessionDescription = SD {
+      sessionStreams :: [MediaStream],
+      sessionRtpMap :: !RtpMap,
+      sessionFmtMap :: !FmtMap
+    } deriving (Eq, Show)
   
 parseSdp :: B.ByteString -> Maybe SessionDescription
-parseSdp s = Nothing
+parseSdp s =
+    case parse sdpLines "" s of
+      Left _   -> Nothing
+      Right ls -> let rtpMap  = collateRtpMap ls
+                      fmtMap  = collateFmtMap ls
+                      streams = collateStreams ls 
+                  in Just $ SD streams rtpMap fmtMap
+  where
+    collateRtpMap :: [SdpLine] -> RtpMap
+    collateRtpMap ls = 
+      let select x = case x of RtpP _ -> True; _ -> False
+          index (RtpP rtp) = let idx = rtpFormat rtp in (idx, rtp)
+      in Map.fromList $ map index $ filter select ls
 
-sdpLines = many sdpLine
+    collateFmtMap :: [SdpLine] -> FmtMap
+    collateFmtMap ls = 
+      let select x = case x of FmtP _ _ -> True; _ -> False
+          index (FmtP idx s) = (idx, s)
+      in Map.fromList $ map index $ filter select ls
+
+    collateStreams :: [SdpLine] -> [MediaStream]
+    collateStreams ls = 
+      let select x = case x of Media _ -> True; _ -> False;
+          unpack (Media s) = s
+      in map unpack $ filter select ls
+  
+sdpLines = many $ do { l <- sdpLine; many newline; return l }
 
 sdpLine = version <|> originator <|> name <|> info <|> Sdp.uri <|> email <|> 
           connectionData <|> timing <|> repeatTiming <|> mediaDescription <|> 
@@ -88,13 +136,13 @@ originator = do
 name = do 
   char 's'
   char '='
-  s <- many1 anyChar
+  s <- many1 (noneOf "\r\n")
   return $! Name s
   
 info = do 
   char 'i'
   char '='
-  s <- many1 anyChar
+  s <- many1 (noneOf "\r\n")
   return $! Info s
   
 uri = do 
@@ -173,7 +221,7 @@ mediaDescription = do
     fmt <- many1 $ do x <- integer
                       many space
                       return (fromIntegral x)
-    return $! Media mt ports p fmt
+    return $! Media $ Stream mt ports p fmt
   where 
     unpack p 0 = Nothing
     unpack p n = let n' = n-1 in Just (fromIntegral p + n', n')
@@ -181,7 +229,7 @@ mediaDescription = do
 attribute = do 
   char 'a'
   char '='
-  s <- many1 (noneOf ":")
+  s <- many1 (noneOf ":\r\n")
   many (char ':')
   case s of 
     "rtpmap" -> rtpMap
@@ -195,7 +243,7 @@ rtpMap = do
     char '/'
     clock <- integer
     args <- args <|> return ""
-    return $ RtpMap (fromIntegral fmtId) encoding (fromIntegral clock) args
+    return $ RtpP $ RtpParams (fromIntegral fmtId) encoding (fromIntegral clock) args
   where
     args = do 
       char '/'
@@ -206,7 +254,7 @@ formatp = do
   fmtId <- integer
   space 
   s <- many1 (noneOf "\r\n")
-  return $ FormatP (fromIntegral fmtId) s
+  return $ FmtP (fromIntegral fmtId) s
 
 mediaType = do 
   s <- many1 (noneOf " \t")
@@ -264,20 +312,53 @@ testParseLine = fromRight . parse sdpLine ""
 
 -- Test parsing the basic lines as described in the SDP RFC, using the examples
 -- provided there
-rfcTests = TestList [
+rfcLineTests = TestList [
   "Version"     ~: (Version 0)                                                           ~=? testParseLine "v=0",
   "Originator"  ~: (Originator "jdoe" 2890844526 2890842807 AF_INET (Addr 0x0a2f1005))   ~=? testParseLine "o=jdoe 2890844526 2890842807 IN IP4 10.47.16.5",
   "Name"        ~: (Name "SDP Seminar")                                                  ~=? testParseLine "s=SDP Seminar",
   "Uri"         ~: (Uri (fromJust $ parseURI "http://www.example.com/seminars/sdp.pdf")) ~=? testParseLine "u=http://www.example.com/seminars/sdp.pdf",
   "Info"        ~: (Info "A Seminar on the session description protocol")                ~=? testParseLine "i=A Seminar on the session description protocol", 
   "Email"       ~: (Email "j.doe@example.com (Jane Doe)")                                ~=? testParseLine "e=j.doe@example.com (Jane Doe)",
-  "Timeing"     ~: (Timing 2873397496 2873404696)                                        ~=? testParseLine "t=2873397496 2873404696",
+  "Connection"  ~: (ConnectionData AF_INET (Addr 0xe002110c) (Just 127) Nothing)         ~=? testParseLine "c=IN IP4 224.2.17.12/127",
+  "Timing"      ~: (Timing 2873397496 2873404696)                                        ~=? testParseLine "t=2873397496 2873404696",
   "Repeat"      ~: (RepeatTiming 604800 3600 [0,90000])                                  ~=? testParseLine "r=604800 3600 0 90000",
   "RepeatUnits" ~: (RepeatTiming 604800 3600 [0,90000])                                  ~=? testParseLine "r=7d 1h 0 25h",
-  "Media"       ~: (Media Video [49170,49171] Rtp [31])                                  ~=? testParseLine "m=video 49170/2 RTP/AVP 31",
-  "Media Map"   ~: (Media Audio [49230] Rtp [96,97,98])                                  ~=? testParseLine "m=audio 49230 RTP/AVP 96 97 98",
-  "RtpMap"      ~: (RtpMap 99 "h263-1998" 90000 "")                                      ~=? testParseLine "a=rtpmap:99 h263-1998/90000",
-  "FormatP"     ~: (FormatP 99 "dummy text")                                             ~=? testParseLine "a=fmtp:99 dummy text"
+  "Media"       ~: (Media (Stream Video [49170,49171] Rtp [31]))                         ~=? testParseLine "m=video 49170/2 RTP/AVP 31",
+  "Media Map"   ~: (Media (Stream Audio [49230] Rtp [96,97,98]))                         ~=? testParseLine "m=audio 49230 RTP/AVP 96 97 98",
+  "RtpMap"      ~: (RtpP (RtpParams 99 "h263-1998" 90000 ""))                            ~=? testParseLine "a=rtpmap:99 h263-1998/90000",
+  "FormatP"     ~: (FmtP 99 "dummy text")                                                ~=? testParseLine "a=fmtp:99 dummy text"
   ]
+  
+rfcSession = TestCase $ do 
+  let text = "v=0\n"                                              ++ 
+             "o=jdoe 2890844526 2890842807 IN IP4 10.47.16.5\n"   ++
+             "s=SDP Seminar\n"                                    ++ 
+             "i=A Seminar on the session description protocol\n"  ++
+             "u=http://www.example.com/seminars/sdp.pdf\n"        ++
+             "e=j.doe@example.com (Jane Doe)\n"                   ++
+             "c=IN IP4 224.2.17.12/127\n"                         ++
+             "t=2873397496 2873404696\n"                          ++
+             "a=recvonly\n"                                       ++
+             "m=audio 49170 RTP/AVP 0\n"                          ++ 
+             "m=video 51372/2 RTP/AVP 99\n"                       ++
+             "a=rtpmap:99 h263-1998/90000"                        ++
+             "a=fmtp:99 1234567890ABCDEF"
+             
+  let expected = [Version 0,
+                  Originator "jdoe" 2890844526 2890842807 AF_INET (Addr 0x0a2f1005),
+                  Name "SDP Seminar",
+                  Info "A Seminar on the session description protocol",
+                  Uri (fromJust $ parseURI "http://www.example.com/seminars/sdp.pdf"),
+                  Email "j.doe@example.com (Jane Doe)",
+                  ConnectionData AF_INET (Addr 0xe002110c) (Just 127) Nothing,
+                  Timing 2873397496 2873404696,
+                  Attribute "recvonly",
+                  Media (Stream Audio [49170] Rtp [0]),
+                  Media (Stream Video [51372,51373] Rtp [99]),
+                  RtpP (RtpParams 99 "h263-1998" 90000 ""),
+                  FmtP 99 "1234567890ABCDEF"] 
 
-unitTests = TestList [rfcTests]
+  let ls = fromRight $ parse sdpLines "" text
+  assertEqual "Session Description" expected ls
+
+unitTests = TestList [rfcLineTests, rfcSession]
