@@ -3,12 +3,14 @@
 module Sdp where 
 
 import qualified Data.ByteString as B
+import qualified Data.ByteString.UTF8 as Utf8
 import Data.Bits
 import Data.Char
 import Data.List
 import qualified Data.Map as Map
 import Data.Either.Utils
 import Data.Maybe
+import Network.URI
 import Numeric
 import Text.Parsec
 import Text.Parsec.Char
@@ -37,6 +39,9 @@ data Protocol = Udp | Rtp | SecureRtp | Other String
 data BandwidthMode = ConfidenceTotal | ApplicationSpecific | UnknownBw String
                      deriving (Eq, Show)
                      
+--data Originator = Originator {                 
+--                } deriving (Eq, Show)
+                     
 data RtpParams = RtpParams { 
                    rtpFormat   :: !Int,
                    rtpEncoding :: !String,
@@ -52,7 +57,7 @@ data MediaStream = Stream {
                   } deriving (Eq, Show)
 
 data SdpLine = Version Integer
-             | Originator String Integer Integer Family Address
+             | Orig String Integer Integer Family Address
              | Name String
              | Info String
              | Uri URI
@@ -68,26 +73,43 @@ data SdpLine = Version Integer
              | Attribute String
              deriving (Show, Eq)
 
+isMediaLine (Media _) = True
+isMediaLine _ = False
 
 type RtpMap = Map.Map Int RtpParams
 
 type FmtMap = Map.Map Int String
 
 data SessionDescription = SD {
+      sessionName    :: !String,
+      sessionInfo    :: !String,
+      sessionUri     :: !(Maybe URI),
       sessionStreams :: [MediaStream],
-      sessionRtpMap :: !RtpMap,
-      sessionFmtMap :: !FmtMap
+      sessionRtpMap  :: !RtpMap,
+      sessionFmtMap  :: !FmtMap
     } deriving (Eq, Show)
   
 parseSdp :: B.ByteString -> Maybe SessionDescription
 parseSdp s =
     case parse sdpLines "" s of
       Left _   -> Nothing
-      Right ls -> let rtpMap  = collateRtpMap ls
+      Right ls -> let name    = extractName ls
+                      info    = extractInfo ls
+                      uri     = extractUri ls   
+                      rtpMap  = collateRtpMap ls
                       fmtMap  = collateFmtMap ls
                       streams = collateStreams ls 
-                  in Just $ SD streams rtpMap fmtMap
+                  in Just $! SD name info uri streams rtpMap fmtMap
   where
+    extractName :: [SdpLine] -> String
+    extractName ls = maybe "" (\(Name s) -> s) $ find (\x -> case x of Name _ -> True; _ -> False) ls
+
+    extractInfo :: [SdpLine] -> String
+    extractInfo ls = maybe "" (\(Info s) -> s) $ find (\x -> case x of Info _ -> True; _ -> False) ls
+        
+    extractUri :: [SdpLine] -> Maybe URI
+    extractUri ls = maybe (Nothing) (\(Uri u) -> Just u) $ find (\x -> case x of Uri _ -> True; _ -> False;) ls
+      
     collateRtpMap :: [SdpLine] -> RtpMap
     collateRtpMap ls = 
       let select x = case x of RtpP _ -> True; _ -> False
@@ -105,7 +127,18 @@ parseSdp s =
       let select x = case x of Media _ -> True; _ -> False;
           unpack (Media s) = s
       in map unpack $ filter select ls
-  
+
+-- | finds and groups all of the sdp lines about streams  
+extractStreams :: [SdpLine] -> [[SdpLine]]
+extractStreams ls = extract ls []
+  where
+    extract :: [SdpLine] -> [[SdpLine]] -> [[SdpLine]]
+    extract (h:t) acc
+      | isMediaLine h = let s = h : (takeWhile (not . isMediaLine) t) 
+                        in extract t (s : acc)
+      | otherwise = extract t acc
+    extract [] acc = reverse acc
+      
 sdpLines = many $ do { l <- sdpLine; many newline; return l }
 
 sdpLine = version <|> originator <|> name <|> info <|> Sdp.uri <|> email <|> 
@@ -131,7 +164,7 @@ originator = do
   family <- addressFamily
   space
   addr  <- address
-  return $! Originator userName sessionId sessionVer family addr
+  return $! Orig userName sessionId sessionVer family addr
 
 name = do 
   char 's'
@@ -314,7 +347,7 @@ testParseLine = fromRight . parse sdpLine ""
 -- provided there
 rfcLineTests = TestList [
   "Version"     ~: (Version 0)                                                           ~=? testParseLine "v=0",
-  "Originator"  ~: (Originator "jdoe" 2890844526 2890842807 AF_INET (Addr 0x0a2f1005))   ~=? testParseLine "o=jdoe 2890844526 2890842807 IN IP4 10.47.16.5",
+  "Originator"  ~: (Orig "jdoe" 2890844526 2890842807 AF_INET (Addr 0x0a2f1005))         ~=? testParseLine "o=jdoe 2890844526 2890842807 IN IP4 10.47.16.5",
   "Name"        ~: (Name "SDP Seminar")                                                  ~=? testParseLine "s=SDP Seminar",
   "Uri"         ~: (Uri (fromJust $ parseURI "http://www.example.com/seminars/sdp.pdf")) ~=? testParseLine "u=http://www.example.com/seminars/sdp.pdf",
   "Info"        ~: (Info "A Seminar on the session description protocol")                ~=? testParseLine "i=A Seminar on the session description protocol", 
@@ -343,7 +376,16 @@ rfcSession = TestCase $ do
              "m=video 51372/2 RTP/AVP 99\n"                       ++
              "a=rtpmap:99 h263-1998/90000"                        ++
              "a=fmtp:99 1234567890ABCDEF"
-             
+
+  let expected = SD "SDP Seminar"
+                    "A Seminar on the session description protocol"
+                    (parseURI "http://www.example.com/seminars/sdp.pdf")
+                    [Stream Audio [49170] Rtp [0], Stream Video [51372,51373] Rtp [99]]
+                    (Map.fromList [(99, RtpParams 99 "h263-1998" 90000 "")])
+                    (Map.fromList [(99, "1234567890ABCDEF")])
+                     
+  assertEqual "Session Description" expected $ fromJust (parseSdp $ Utf8.fromString text) 
+{-
   let expected = [Version 0,
                   Originator "jdoe" 2890844526 2890842807 AF_INET (Addr 0x0a2f1005),
                   Name "SDP Seminar",
@@ -357,8 +399,8 @@ rfcSession = TestCase $ do
                   Media (Stream Video [51372,51373] Rtp [99]),
                   RtpP (RtpParams 99 "h263-1998" 90000 ""),
                   FmtP 99 "1234567890ABCDEF"] 
-
   let ls = fromRight $ parse sdpLines "" text
   assertEqual "Session Description" expected ls
+-}
 
 unitTests = TestList [rfcLineTests, rfcSession]

@@ -105,12 +105,13 @@ processMessage rq@(Rtsp.Request sq verb uri version headers) body state = do
 {-
 handleAnnounce :: Rtsp.Request -> Maybe B.ByteString -> ConnState -> IO ConnState
 handleAnnounce rq body state = do
-  userInfo <- authenticate rq 
-  case userInfo of
-    Nothing -> -- generate auth info and response
-    Just userId -> 
+userInfo <- authenticate rq 
+case userInfo of
+  Nothing -> -- generate auth info and response
+  Just userId -> 
 -}
 
+liftMaybe :: Monad m => Maybe a -> MaybeT m a 
 liftMaybe = MaybeT . return
 
 runScript :: ScriptResultIO (Maybe a) -> MaybeT IO a
