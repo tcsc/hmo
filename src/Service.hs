@@ -14,6 +14,7 @@ import Data.List
 import Data.Maybe
 import System.Timeout(timeout)
 import System.Log.Logger
+import System.Timeout
 
 import WorkerTypes
 
@@ -39,7 +40,7 @@ type ServiceHandler msg   -- ^ The range of possible messages
                     = msg -> state -> IO (reply, state)
 
 
--- | An erlang-style service framework
+-- | An erlang-style gen_service framework
 
 newService :: ServiceSetup msg rpy state -> 
               ServiceHandler msg rpy state -> 
@@ -55,17 +56,22 @@ stopService (Svc q) = do
   replyVar <- newEmptyTMVarIO
   atomically $ writeTChan q (ExitSvc replyVar)
   atomically $ takeTMVar replyVar
-  
+
+--  | Asks the service to perform some task and does not wait for a reply
+post :: Service msg rpy state -> msg -> IO ()
+post (Svc q) msg = do
+  replyVar <- newEmptyTMVarIO
+  atomically $ writeTChan q (Cast msg)   
+
+-- | Asks the service to perform some task and waits for a reply
 call :: Service msg rpy state -> msg -> IO rpy
 call (Svc q) msg = do
   replyVar <- newEmptyTMVarIO
   atomically $ writeTChan q (Call msg replyVar)   
   atomically $ takeTMVar replyVar
   
-post :: Service msg rpy state -> msg -> IO ()
-post (Svc q) msg = do
-  replyVar <- newEmptyTMVarIO
-  atomically $ writeTChan q (Cast msg)   
+callWithTimeout :: Service msg rpy state -> msg -> Int -> IO (Maybe rpy)
+callWithTimeout svc msg t = timeout t $ call svc msg
   
 serverThread :: WorkerSetup s -> MessageHandler msg rpy s -> WorkerTeardown s -> SvcQ msg rpy -> IO ()
 serverThread setup handler teardown msgq = bracket (setup) (teardown) (loop msgq handler)
