@@ -36,7 +36,7 @@ data Msg = Interrupt
 type MsgQ = TChan Msg 
 
 main :: IO ()
-main = do 
+main = withSocketsDo $ do 
     q <- newTChanIO
     setLogger
     infoLog "Loading configuration"
