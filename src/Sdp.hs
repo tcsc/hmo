@@ -80,6 +80,8 @@ type RtpMap = Map.Map Int RtpParams
 
 type FmtMap = Map.Map Int String
 
+-- | A parsed description of a media session, enumerating all of the streams
+--   and media types that make up a combined media presentation.
 data SessionDescription = SD {
       sessionName    :: !String,
       sessionInfo    :: !String,

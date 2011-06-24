@@ -83,11 +83,10 @@ bind (MkListener threadManager) family address port handler = do
                   sClose s
 
     cleanupListener :: Socket -> IO ()
-    cleanupListener socket = do {
-      infoLog "Cleaning up TCP listener";
-      sClose socket;
-      infoLog "Socket closed";
-    }
+    cleanupListener socket = do
+      infoLog "Cleaning up TCP listener"
+      sClose socket
+      infoLog "Socket closed"
 
 stopListener :: TcpListener -> IO ()
 stopListener (MkListener threadManager) = do
@@ -105,6 +104,10 @@ createSocket addrFamily addr port = do
                               infoLog $ "starting to listen on port " ++ (show port)
                               listen sock maxListenQueue
                               return sock)
+
+-- ----------------------------------------------------------------------------
+--
+-- ----------------------------------------------------------------------------
                               
 debugLog :: String -> IO ()
 debugLog = debugM "tcp"

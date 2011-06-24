@@ -22,6 +22,7 @@ import Data.Typeable
 import Network.Socket hiding (send, sendTo, recv, recvFrom)
 import Network.Socket.ByteString
 import Test.HUnit(Test(..), assertBool, assertEqual)
+import System.Log.Logger
 
 import Authentication
 import qualified Rtsp as Rtsp
@@ -32,39 +33,46 @@ import Service
 
 data ConnReply = NoReply
                | OK
-  deriving (Show)
+               | Terminate
+               deriving (Show)
 
 type ReplyVar = TMVar ConnReply
   
 data ItemToSend = Message Rtsp.Message (Maybe B.ByteString)
                 | Packet Rtsp.Packet
+                | QuitWriter
 
 data ConnMsg = Hello ReplyVar
              | InboundMsg Rtsp.Message (Maybe B.ByteString)
              | InboundPacket Rtsp.Packet
              | GetItemToSend (TMVar ItemToSend)
              | BadRequest
-             
+             | CloseConnection
+             | WriterExited
+             | ReaderExited
+             deriving (Show)
+
+data ConnState = ConnAlive
+               | ShuttingDown
+               deriving (Show, Eq)
+           
 -- | Defines a state block for the connection.
-data ConnState = State {
-  readerThread :: !ThreadId,
-  writerThread :: !ThreadId,
-  writerReplyVar :: !(Maybe (TMVar ItemToSend)),
-  sendQueue :: ![ItemToSend],
+data ConnInfo = State {
+  connSocket      :: !Socket,
+  connState       :: !ConnState,
+  readerThread    :: !ThreadId,
+  writerThread    :: !ThreadId,
+  writerReplyVar  :: !(Maybe (TMVar ItemToSend)),
+  sendQueue       :: ![ItemToSend],
   pendingMessages :: !(Map.Map Int Rtsp.Message)
 }
 
-type RtspSvc = Service ConnMsg ConnReply ConnState
+type RtspSvc = Service ConnMsg ConnReply ConnInfo
   
 data RtspConnection = MkConn RtspSvc
 
 instance Show (TMVar a) where
   show _ = "tmvar"
-
--- | An exception thrown into the reader thread to signal a shutdown request
-data ExitThread = ExitThread ReplyVar
-  deriving (Show, Typeable)
-instance Exception ExitThread
 
 -- | Spawns a new connection manager thread and returns a RtspConnection that 
 --   can used to address the connection
@@ -73,26 +81,32 @@ new s maxData = do
     svc <- newService (newState s maxData) (handleCall) (closeState)
     return $ MkConn svc
   where
-    newState :: Socket -> Int -> RtspSvc -> IO ConnState
+    newState :: Socket -> Int -> RtspSvc -> IO ConnInfo
     newState sk cutoff svc = do
       readerTid <- forkIO $ reader sk cutoff svc
       writerTid <- forkIO $ writer sk svc
-      return $ State readerTid writerTid Nothing [] Map.empty
+      return $ State sk ConnAlive readerTid writerTid Nothing [] Map.empty
       
-    closeState :: ConnState -> IO ()
+    closeState :: ConnInfo -> IO ()
     closeState state = return ()
-    
 
--- | Handle 
-handleCall :: ConnMsg -> ConnState -> IO (ConnReply, ConnState)
+-- | Handles a message from a client
+handleCall :: ConnMsg -> ConnInfo -> IO (ConnReply, ConnInfo)
 handleCall (InboundMsg msg body) state = processMessage msg body state >>= \state' -> return (NoReply, state')
 handleCall (InboundPacket pkt) state = return (NoReply, state)
 handleCall (GetItemToSend rx) state = getItemToSend rx state >>= \state' -> return (NoReply, state')
+handleCall BadRequest state = processBadRequest state >>= \state' -> return (NoReply, state')
+handleCall WriterExited state = do
+  debugLog "Writer thread has exited"
+  sClose (connSocket state)
+  return (NoReply, state)
+  
 handleCall _ state = return (NoReply, state)
 
 -- | Handles the receipt of a message and begins processing it
-processMessage :: Rtsp.Message -> Maybe B.ByteString -> ConnState -> IO ConnState
+processMessage :: Rtsp.Message -> Maybe B.ByteString -> ConnInfo -> IO ConnInfo
 processMessage rq@(Rtsp.Request sq verb uri version headers) body state = do 
+    debugLog $ "Received Msg: " ++ (show rq)
     (r, state') <- do case verb of 
                         -- Rtsp.Announce -> handleAnnounce rq body state
                         _ -> notImplemented state
@@ -100,10 +114,28 @@ processMessage rq@(Rtsp.Request sq verb uri version headers) body state = do
     putItemToSend (Message r Nothing) state'
   where
     notImplemented state = return $ (Rtsp.Response sq Rtsp.NotImplemented Headers.empty, state)
+    
+    
+badRequest = Rtsp.Response 0 Rtsp.BadRequest Headers.empty
+  
+processBadRequest :: ConnInfo -> IO ConnInfo
+processBadRequest state = do
+  state' <- putItemToSend (Message badRequest Nothing) (clearQueue state)
+  disconnect state'
+  
+disconnect :: ConnInfo -> IO ConnInfo
+disconnect state = do
+  let sk     = connSocket state
+  let state' = state {connState = ShuttingDown}
+  shutdown sk ShutdownReceive
+  putItemToSend QuitWriter state'
+
+clearQueue :: ConnInfo -> ConnInfo
+clearQueue state = state {sendQueue = []}
 
 -- | 
 {-
-handleAnnounce :: Rtsp.Request -> Maybe B.ByteString -> ConnState -> IO ConnState
+handleAnnounce :: Rtsp.Request -> Maybe B.ByteString -> ConnInfo -> IO ConnInfo
 handleAnnounce rq body state = do
 userInfo <- authenticate rq 
 case userInfo of
@@ -137,7 +169,7 @@ internalServerError sq = Rtsp.Response sq Rtsp.InternalServerError Headers.empty
 --   item directly to it, bypassing the queue.
 -- 
 --   This should only ever be called on the connection thread
-putItemToSend :: ItemToSend -> ConnState -> IO ConnState
+putItemToSend :: ItemToSend -> ConnInfo -> IO ConnInfo
 putItemToSend item state = do 
   case writerReplyVar state of 
     Nothing -> do let q' = item : (sendQueue state) 
@@ -149,8 +181,8 @@ putItemToSend item state = do
 --   envelope (a TMVar). If the send queue is empty, this function saves a
 --   reference to the TMVar so that it can be filled when data arrives.
 --
---   This should only ever be called on the connection thread
-getItemToSend :: TMVar ItemToSend -> ConnState -> IO ConnState
+--   This should only ever be called on the connection management thread
+getItemToSend :: TMVar ItemToSend -> ConnInfo -> IO ConnInfo
 getItemToSend rx state = do
   case sendQueue state of 
     -- nothing to send, store the reply slot for filling later on
@@ -163,16 +195,18 @@ getItemToSend rx state = do
 writer :: Socket -> RtspSvc -> IO ()
 writer s svc = do
     receiver <- newEmptyTMVarIO
-    writeLoop s svc receiver `catch`
-      \(ExitThread rpy) -> atomically $ putTMVar rpy OK
+    writeLoop s svc receiver
+    debugLog "Posting writer exit message"
+    post svc WriterExited
   where
     writeLoop :: Socket -> RtspSvc -> (TMVar ItemToSend) -> IO ()
     writeLoop s svc rx = do
       post svc (GetItemToSend rx)
       item <- atomically $ takeTMVar rx
-      let bytes = format item
-      send s bytes
-      writeLoop s svc rx
+      case item of
+        QuitWriter -> return () 
+        _ -> do send s $ format item
+                writeLoop s svc rx
       
     format :: ItemToSend -> B.ByteString
     format (Message msg body) = Rtsp.formatMessage msg body
@@ -186,16 +220,15 @@ data ReaderState = RS (Maybe Rtsp.Message) Int
 --   parsed messages on to the connection manager thread
 reader :: Socket -> Int -> RtspSvc -> IO ()
 reader s maxData svc = do 
-    let state = RS Nothing 0
-    readLoop s maxData (B.empty) svc state `catch` 
-      \(ExitThread rpy) -> atomically $ putTMVar rpy OK
+    readLoop s maxData (B.empty) svc (RS Nothing 0) `catch` 
+      \(e :: IOError) -> post svc ReaderExited
   where 
     readLoop :: Socket -> Int -> B.ByteString -> RtspSvc -> ReaderState -> IO ()
     readLoop s maxData pending svc state = do
-      rdBuf <- recv s 512
-      let buffer = B.append pending $ rdBuf
-      (remainder, state') <- process svc buffer state
-      readLoop s maxData remainder svc state'
+	    rdBuf <- recv s 512
+	    let buffer = B.append pending $ rdBuf
+	    (remainder, state') <- process svc buffer state
+	    readLoop s maxData remainder svc state'
       
 -- | Recursively pulls data out of the processing buffer and acts on it as 
 --   necessary. Returns an updates state block and the remaining, unprocessed
@@ -228,7 +261,7 @@ process svc bytes state@(RS pending cLen)
           case (Rtsp.parseMessage msg) of 
             Nothing -> do
               post svc BadRequest
-              return (remainder, state)
+              return (B.empty, state)
 
             Just msg -> do 
               let cLen' = Rtsp.msgContentLength msg
@@ -238,6 +271,20 @@ process svc bytes state@(RS pending cLen)
                         process svc remainder state
                         
         Nothing -> return (bytes, state)
+
+-- ----------------------------------------------------------------------------
+-- 
+-- ----------------------------------------------------------------------------
+errorLog :: String -> IO ()
+errorLog = errorM "rtsp"
+ 
+debugLog :: String -> IO ()
+debugLog s = do
+  m <- myThreadId
+  debugM "rtsp" $ (show m) ++ ": " ++ s
+
+infoLog :: String -> IO ()
+infoLog = infoM "rtsp"
 
 -- ----------------------------------------------------------------------------
 -- Unit tests
@@ -281,6 +328,6 @@ testProcessing = TestCase (do
     InboundMsg msg Nothing -> return()
     _ -> assertBool "Expected message with no body" False) 
   
-  -}
+-}
 --unitTests = TestList [testProcessing, testProcessMessage]
 unitTests = TestList []

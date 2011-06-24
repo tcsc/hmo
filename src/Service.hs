@@ -2,6 +2,7 @@ module Service(
   Service,
   newService,
   stopService,
+  stopServiceWithoutWaiting,
   call,
   post
 ) 
@@ -49,13 +50,21 @@ newService setup handler teardown = do
   q <- newTChanIO
   let svc = Svc q
   forkIO $ serverThread (setup svc) handler teardown q
-  return svc
-  
+  return svc  
+
 stopService :: Service msg rpy state -> IO ()
-stopService (Svc q) = do
+stopService svc = do
+  replyVar <- stopServiceInternal svc
+  atomically $ takeTMVar replyVar
+
+stopServiceWithoutWaiting :: Service msg rpy state -> IO ()
+stopServiceWithoutWaiting svc = stopServiceInternal svc >> return ()
+  
+stopServiceInternal :: Service msg rpy state -> IO (ReplyVar ())
+stopServiceInternal (Svc q) = do 
   replyVar <- newEmptyTMVarIO
   atomically $ writeTChan q (ExitSvc replyVar)
-  atomically $ takeTMVar replyVar
+  return replyVar
 
 --  | Asks the service to perform some task and does not wait for a reply
 post :: Service msg rpy state -> msg -> IO ()

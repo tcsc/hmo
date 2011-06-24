@@ -39,6 +39,7 @@ import qualified Headers as Headers
 import Parsec
 
 data Status = OK
+            | BadRequest
             | NotFound
             | InternalServerError
             | NotImplemented
@@ -253,6 +254,7 @@ hdrContentLength = "Content-Length"
 
 statusDescriptions = Map.fromList $ map (\(s,t) -> (s, Utf8.fromString t)) [ 
                         (OK,                  "OK"),
+                        (BadRequest,          "BadRequest"),
                         (NotFound,            "Not Found"),
                         (InternalServerError, "Internal Server Error"), 
                         (NotImplemented,      "Not Implemented"),
@@ -263,6 +265,7 @@ statusDescriptions = Map.fromList $ map (\(s,t) -> (s, Utf8.fromString t)) [
                         (OptionNotSupported,  "Option Not Supported") ]
  
 statusMap = Bimap.fromList [ (200, OK),
+                             (400, BadRequest),
                              (404, NotFound),
                              (500, InternalServerError), 
                              (501, NotImplemented),
@@ -329,6 +332,7 @@ testVerbs = TestList [
 
 testStatusToEnum = TestList [
   "OK"              ~: OK                  ~=? Rtsp.toStatus 200,
+  "Bad Request"     ~: BadRequest          ~=? Rtsp.toStatus 400,
   "Not Found"       ~: NotFound            ~=? Rtsp.toStatus 404,
   "Error"           ~: InternalServerError ~=? Rtsp.toStatus 500,
   "Not Implemented" ~: NotImplemented      ~=? Rtsp.toStatus 501,
