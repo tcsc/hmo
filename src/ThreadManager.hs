@@ -89,7 +89,9 @@ type ThreadResultIO err a = ErrorT err IO a
 
 type ExitAction ts e = Error e => ThreadInfo ts e -> IO ()
 
--- | An external handle to a thread manager
+-- | An external handle to a thread manager. A thread manager can be thought of as a set
+--   of threads that can be managed as a group, and with automatic restart behaviour
+--   defined for each thread.
 data ThreadManager ts e = MkThreadMgr (CtlQ ts e)
 
 data ThreadState = Running
@@ -101,6 +103,8 @@ data TmState ts err = TmState {
   threads :: !(Map.Map ThreadId (ThreadInfo ts err))
 }
 
+-- | Creates a new thread manager and starts the manager thread that governs the
+--   other threads in the management group. All thread 
 newThreadManager :: (Error e) => IO (ThreadManager ts e)
 newThreadManager = do
   debugLog "Creating new thread manager"
@@ -108,7 +112,7 @@ newThreadManager = do
   forkIO $ threadMgr ctlQ
   return $ MkThreadMgr ctlQ
 
--- | shuts down the thread manager and waits for any outstanding threads to
+-- | Shuts down the thread manager and waits for any outstanding threads to
 --   exit
 stopThreadManager :: (ThreadManager ts e) -> IO ()
 stopThreadManager (MkThreadMgr ctlQ) = do
@@ -122,7 +126,7 @@ stopThreadManager (MkThreadMgr ctlQ) = do
   debugLog "Thread manager stopped"
   return ()
 
--- | creates a new thread and waits for confirmation
+-- | creates a new thread and waits for confirmation 
 spawnThread :: ThreadManager ts e -> 
                ThreadInit ts e ->
                ThreadMain ts ->
@@ -177,7 +181,11 @@ threadMgr ctlQ = loop ctlQ (TmState Map.empty)
             RestartThread tid -> do  
               state' <- onRestartThread tid ctlQ state
               loop ctlQ state'
-              
+    
+            Shutdown rpy -> do
+              state' <- onShutdownRequested ctlQ rpy state
+              loop ctlQ state'
+          
             ThreadDeath tid err -> do
               debugLog $ "Detected ThreadDeath on Thread " ++ (show tid) ++ " with error" ++ (show err)
               state' <- onThreadDeath tid ctlQ state
@@ -186,11 +194,7 @@ threadMgr ctlQ = loop ctlQ (TmState Map.empty)
             ThreadExit tid -> do
               state' <- onThreadExit tid state
               loop ctlQ state'
-              
-            Shutdown rpy -> do
-              state' <- onShutdownRequested ctlQ rpy state
-              loop ctlQ state'
-              
+                            
             CheckThreadCount rpy -> do
               let n = threadCount state
               debugLog $ (show n) ++ " pending threads"
@@ -198,16 +202,20 @@ threadMgr ctlQ = loop ctlQ (TmState Map.empty)
                 0 -> atomically $ putTMVar rpy OK
                 _ -> loop ctlQ state
 
+-- | How many threads is the manager currently running?
 threadCount :: TmState ts e -> Int
 threadCount s = Map.size (threads s)
 
+-- | Wraps the thread action in a custom setup and teardown block and performs
+--   the actual fork, as well as the registration of the new thread in the 
+--   manager's state block. 
 forkThread :: (Error err) => ThreadInit ts err -> 
-              ThreadMain ts -> 
-              ThreadCleanup ts -> 
-              CrashBehaviour -> 
-              CtlQ ts e -> 
-              TmState ts err ->
-              ErrorT err IO (ThreadId, TmState ts err)
+            								 ThreadMain ts -> 
+								             ThreadCleanup ts -> 
+								             CrashBehaviour -> 
+								             CtlQ ts e -> 
+								             TmState ts err ->
+								             ErrorT err IO (ThreadId, TmState ts err)
 forkThread init main cleanup crashBehaviour ctlQ state = do
     (threadState, sig) <- init
     tid <- liftIO $ forkIO $ threadWrapper main cleanup threadState ctlQ
@@ -234,7 +242,7 @@ requestThreadExit tid rpy state = do
                     return state'
 
 -- | Adds an exit action to each managed thread in the thread map. More useful
---   than doing it all one-by-one in soe cases.
+--   than doing it all one-by-one in some cases.
 addExitActionToAll :: Error e => ExitAction ts e -> (TmState ts e) -> (TmState ts e)
 addExitActionToAll action state = state { threads = threads' }
   where threads' = Map.map (addExitAction action) (threads state)
@@ -250,7 +258,7 @@ addExitAction :: Error e => ExitAction ts e -> (ThreadInfo ts e) -> (ThreadInfo 
 addExitAction action info = info { exitActions = actions }
   where actions = action : (exitActions info)
 
--- | Updates the bookkeeping for the exited thread and runs the associated 
+-- | Updates the book-keeping for the exited thread and runs the associated 
 --   thread's exit actions
 onThreadExit :: ThreadId -> TmState ts e -> IO (TmState ts e)
 onThreadExit tid state = do
@@ -261,7 +269,10 @@ onThreadExit tid state = do
       debugLog $ "Running " ++ ((show . length . exitActions) info) ++ " exit actions"
       mapM_ (\action -> action info) (exitActions info) 
       return $ forgetThread tid state
-      
+
+-- | Updates the manager's book-keeping for a dead thread (i.e. a thread that
+--   exited via an exception) and (optionally) creates a new thread using the 
+--   dead thread's IO actions.
 onThreadDeath :: Error e => ThreadId -> (CtlQ ts e) -> (TmState ts e ) -> IO (TmState ts e)
 onThreadDeath tid ctlQ state = do
   case Map.lookup tid (threads state) of
@@ -314,6 +325,7 @@ signalThreadExit info = threadSignal info
 forgetThread :: ThreadId -> TmState ts e -> TmState ts e
 forgetThread tid state = state { threads = Map.delete tid (threads state) }
   
+-- | Looks up a thread's information block  
 lookupThread :: ThreadId -> TmState ts e -> Maybe (ThreadInfo ts e)
 lookupThread tid state = Map.lookup tid (threads state)
  

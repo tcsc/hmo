@@ -102,9 +102,13 @@ setLogger = do
 -- |
 bindRtsp :: TcpListener -> Word16 -> Int -> IO ()
 bindRtsp listener port cutoff = do 
-  bind listener AF_INET iNADDR_ANY (fromIntegral port) 
-       (\s -> do { RtspConnection.new s cutoff; return (); } )
-  return ()
+  	bind listener AF_INET iNADDR_ANY (fromIntegral port) handler
+  	return ()
+	where 
+		handler s = do 
+			debugLog "New Connection!"
+			RtspConnection.new s cutoff
+			return ()
 
 -- |
 split :: Eq a => a -> [a] -> [[a]]
