@@ -19,9 +19,9 @@ import Control.Concurrent
 import Control.Concurrent.STM
 import Data.Typeable
 import qualified Scripting.Lua as Lua  
-import System.Log.Logger
 import Test.HUnit
 
+import qualified Logger as Log
 import LuaUtils
 import ScriptTypes
 import Flags
@@ -187,13 +187,19 @@ translateError e =
     LuaUtils.RuntimeError s -> ScriptExecutor.RuntimeError s
     NotFound s              -> ScriptNotFound s
     UntypedError s          -> UndefinedError s
+
+-- ----------------------------------------------------------------------------
+--
+-- ----------------------------------------------------------------------------
     
 debugLog :: String -> IO ()
-debugLog = debugM "script"
+debugLog = Log.debug "scrpt"
 
 infoLog :: String -> IO ()
-infoLog = infoM "script"
+infoLog = Log.info "scrpt"
 
+errorLog :: String -> IO ()
+errorLog = Log.err "scrpt"
 
 -- ----------------------------------------------------------------------------
 -- Unit Tests

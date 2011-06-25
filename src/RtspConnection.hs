@@ -22,11 +22,11 @@ import Data.Typeable
 import Network.Socket hiding (send, sendTo, recv, recvFrom)
 import Network.Socket.ByteString
 import Test.HUnit(Test(..), assertBool, assertEqual)
-import System.Log.Logger
 
 import Authentication
 import qualified Rtsp as Rtsp
 import qualified Headers as Headers
+import qualified Logger as Log
 import ScriptExecutor
 import ScriptTypes
 import Service
@@ -74,6 +74,10 @@ data RtspConnection = MkConn RtspSvc
 instance Show (TMVar a) where
   show _ = "tmvar"
 
+instance Error Rtsp.Status where 
+  noMsg    = Rtsp.InternalServerError
+  strMsg _ = Rtsp.InternalServerError
+  
 -- | Spawns a new connection manager thread and returns a RtspConnection that 
 --   can used to address the connection
 new :: Socket -> Int -> IO RtspConnection
@@ -83,12 +87,15 @@ new s maxData = do
   where
     newState :: Socket -> Int -> RtspSvc -> IO ConnInfo
     newState sk cutoff svc = do
+      debugLog "Entering new connection thread"
       readerTid <- forkIO $ reader sk cutoff svc
       writerTid <- forkIO $ writer sk svc
       return $ State sk ConnAlive readerTid writerTid Nothing [] Map.empty
       
     closeState :: ConnInfo -> IO ()
-    closeState state = return ()
+    closeState state = do 
+      debugLog "Destroying connection"
+      return ()
 
 -- | Handles a message from a client
 handleCall :: ConnMsg -> ConnInfo -> IO (ConnReply, ConnInfo)
@@ -108,14 +115,14 @@ processMessage :: Rtsp.Message -> Maybe B.ByteString -> ConnInfo -> IO ConnInfo
 processMessage rq@(Rtsp.Request sq verb uri version headers) body state = do 
     debugLog $ "Received Msg: " ++ (show rq)
     (r, state') <- do case verb of 
-                        -- Rtsp.Announce -> handleAnnounce rq body state
+                       -- Rtsp.Announce -> handleAnnounce rq body state
                         _ -> notImplemented state
                      `catch` \(e :: ScriptError) -> return (internalServerError sq, state)
     putItemToSend (Message r Nothing) state'
   where
     notImplemented state = return $ (Rtsp.Response sq Rtsp.NotImplemented Headers.empty, state)
-    
-    
+
+badRequest :: Rtsp.Message    
 badRequest = Rtsp.Response 0 Rtsp.BadRequest Headers.empty
   
 processBadRequest :: ConnInfo -> IO ConnInfo
@@ -133,15 +140,18 @@ disconnect state = do
 clearQueue :: ConnInfo -> ConnInfo
 clearQueue state = state {sendQueue = []}
 
--- | 
-{-
-handleAnnounce :: Rtsp.Request -> Maybe B.ByteString -> ConnInfo -> IO ConnInfo
+-- | Handles an announcement request from an RTSP client.
+--
+
+{-handleAnnounce :: Rtsp.Request -> Maybe B.ByteString -> ConnInfo -> IO ConnInfo
 handleAnnounce rq body state = do
-userInfo <- authenticate rq 
-case userInfo of
-  Nothing -> -- generate auth info and response
-  Just userId -> 
--}
+  userInfo <- authenticate rq 
+  case userInfo of
+    Nothing -> -- generate auth info and response
+    Just userId -> do 
+      case Sdp.parse of 
+        Nothing -> -- return invalid arg
+        Just desc -> -- post announcement to session manager and see what happens-}
 
 liftMaybe :: Monad m => Maybe a -> MaybeT m a 
 liftMaybe = MaybeT . return
@@ -194,9 +204,10 @@ getItemToSend rx state = do
 --   formats it and then sends it out over the network.
 writer :: Socket -> RtspSvc -> IO ()
 writer s svc = do
+    debugLog "Entering writer thread"
     receiver <- newEmptyTMVarIO
     writeLoop s svc receiver
-    debugLog "Posting writer exit message"
+    debugLog "Posting writer exited message"
     post svc WriterExited
   where
     writeLoop :: Socket -> RtspSvc -> (TMVar ItemToSend) -> IO ()
@@ -220,8 +231,12 @@ data ReaderState = RS (Maybe Rtsp.Message) Int
 --   parsed messages on to the connection manager thread
 reader :: Socket -> Int -> RtspSvc -> IO ()
 reader s maxData svc = do 
+    debugLog "Entering reader thread"
     readLoop s maxData (B.empty) svc (RS Nothing 0) `catch` 
-      \(e :: IOError) -> post svc ReaderExited
+      \(e :: IOError) -> do
+        debugLog "Posting reader exited message" 
+        post svc ReaderExited
+    debugLog "Exiting reader thread"
   where 
     readLoop :: Socket -> Int -> B.ByteString -> RtspSvc -> ReaderState -> IO ()
     readLoop s maxData pending svc state = do
@@ -276,15 +291,13 @@ process svc bytes state@(RS pending cLen)
 -- 
 -- ----------------------------------------------------------------------------
 errorLog :: String -> IO ()
-errorLog = errorM "rtsp"
+errorLog = Log.err "rtspc"
  
 debugLog :: String -> IO ()
-debugLog s = do
-  m <- myThreadId
-  debugM "rtsp" $ (show m) ++ ": " ++ s
+debugLog = Log.debug "rtspc"
 
 infoLog :: String -> IO ()
-infoLog = infoM "rtsp"
+infoLog = Log.info "rtspc"
 
 -- ----------------------------------------------------------------------------
 -- Unit tests

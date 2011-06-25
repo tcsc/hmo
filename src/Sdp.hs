@@ -82,7 +82,7 @@ type FmtMap = Map.Map Int String
 
 -- | A parsed description of a media session, enumerating all of the streams
 --   and media types that make up a combined media presentation.
-data SessionDescription = SD {
+data Description = SD {
       sessionName    :: !String,
       sessionInfo    :: !String,
       sessionUri     :: !(Maybe URI),
@@ -91,7 +91,7 @@ data SessionDescription = SD {
       sessionFmtMap  :: !FmtMap
     } deriving (Eq, Show)
   
-parseSdp :: B.ByteString -> Maybe SessionDescription
+parseSdp :: B.ByteString -> Maybe Description
 parseSdp s =
     case parse sdpLines "" s of
       Left _   -> Nothing

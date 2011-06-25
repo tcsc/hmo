@@ -1,14 +1,18 @@
 module SessionManager(
+  SessionManager,
   SessionError(..),
+  SessionManager.new,
+  createSession,
   SessionManager.unitTests
 ) where
   
+import Control.Concurrent (myThreadId)
 import Control.Concurrent.STM
 import Control.Monad.Error
-import System.Log.Logger
 import Test.HUnit
 
-import SessionDescription
+import qualified Logger as Log
+import Sdp
 import SessionDatabase
 import ScriptExecutor
 import ScriptTypes
@@ -30,7 +34,7 @@ type SessionResultIO a = ErrorT SessionError IO a
  
 data Header = Auth String
 
-data Msg = CreateSession String SessionDescription UserId
+data Msg = CreateSession String Sdp.Description UserId
          | Setup
 
 data Rpy = OK  
@@ -51,7 +55,9 @@ new executor nThreads = do
     return $ SM executor pool
   where
     setup :: IO ()
-    setup = return ()
+    setup = do
+      debugLog "Entering Session Manager thread"
+      return ()
     
     teardown :: () -> IO ()
     teardown _ = return ()
@@ -64,7 +70,10 @@ new executor nThreads = do
 stopSessionManager :: SessionManager -> IO ()
 stopSessionManager (SM _ pool) = do
   debugLog "Stopping session manager"
-  stopWorkerPool pool 
+  stopWorkerPool pool
+  
+createSession :: SessionManager -> Sdp.Description -> String -> UserId -> IO Rpy
+createSession (SM _ pool) desc path uid = call pool (CreateSession path desc uid)   
 
 translateScriptIO :: ScriptResultIO a -> SessionResultIO a
 translateScriptIO x = do 
@@ -108,10 +117,13 @@ getInfo scripts path uid = do
 -- ----------------------------------------------------------------------------
 
 debugLog :: String -> IO ()
-debugLog = debugM "session"
-
+debugLog = Log.debug "sessn"
+  
 infoLog :: String -> IO ()
-infoLog = infoM "session"
+infoLog = Log.info "sessn"
+
+errorLog :: String -> IO ()
+errorLog = Log.err "sessn"
 
 -- ----------------------------------------------------------------------------
 -- Unit Tests

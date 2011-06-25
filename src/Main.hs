@@ -30,7 +30,9 @@ import Config
 import ScriptExecutor
 import TcpListener
 import RtspConnection
+import SessionManager
 import Signals
+import qualified Logger as Log
 
 data Msg = Interrupt
 type MsgQ = TChan Msg 
@@ -53,6 +55,9 @@ main = withSocketsDo $ do
       Right (config, scripting) -> do 
         infoLog "Installing interrupt signal handler"
         installInterruptHandler (interrupt q)
+
+        infoLog "Starting Session Manager"
+        sessionManager <- SessionManager.new scripting 4
 
         infoLog "Creating TCP listener"        
         listener <- newListener
@@ -106,7 +111,6 @@ bindRtsp listener port cutoff = do
   	return ()
 	where 
 		handler s = do 
-			debugLog "New Connection!"
 			RtspConnection.new s cutoff
 			return ()
 
@@ -120,10 +124,10 @@ split delim as = unfoldr (split' delim) as
       in Just (h, drop 1 t) 
       
 errorLog :: String -> IO ()
-errorLog = errorM "main"
+errorLog = Log.err " main"
  
 debugLog :: String -> IO ()
-debugLog = debugM "main"
+debugLog = Log.debug " main"
 
 infoLog :: String -> IO ()
-infoLog = infoM "main"
+infoLog = Log.info " main"

@@ -28,8 +28,8 @@ import Control.Monad.Error
 import Network
 import Network.BSD
 import Network.Socket as Socket
-import System.Log.Logger
 
+import qualified Logger as Log
 import ThreadManager
 
 type ConnectionHandler = Socket -> IO ()
@@ -110,7 +110,10 @@ createSocket addrFamily addr port = do
 -- ----------------------------------------------------------------------------
                               
 debugLog :: String -> IO ()
-debugLog = debugM "tcp"
+debugLog = Log.debug "  tcp"
 
 infoLog :: String -> IO ()
-infoLog = infoM "tcp"
+infoLog = Log.info "  tcp"
+
+errorLog :: String -> IO ()
+errorLog = Log.err "  tcp"
