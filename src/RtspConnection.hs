@@ -207,8 +207,9 @@ writer s svc = do
     debugLog "Entering writer thread"
     receiver <- newEmptyTMVarIO
     writeLoop s svc receiver
-    debugLog "Posting writer exited message"
+    debugLog "Posting writer exiting message to connection thread"
     post svc WriterExited
+    debugLog "Exiting writer thread"
   where
     writeLoop :: Socket -> RtspSvc -> (TMVar ItemToSend) -> IO ()
     writeLoop s svc rx = do
