@@ -23,7 +23,7 @@ module TcpListener (
 
 import Prelude hiding (catch)
 import Control.Concurrent (ThreadId, forkIO, myThreadId, threadDelay)
-import Control.Exception(SomeException, bracket, bracketOnError, try, catch, finally)
+import Control.Exception(IOException, bracket, bracketOnError, try, catch, finally)
 import Control.Monad.Error
 import Network
 import Network.BSD
@@ -60,7 +60,7 @@ bind (MkListener threadManager) family address port handler = do
     initListener family address port = do
       rval <- liftIO $ do { socket <- createSocket family address port;
                             return (Right socket); } 
-                       `catch` \(e :: SomeException) -> return (Left BindFailed)
+                       `catch` \(e :: IOException) -> return (Left BindFailed)
       case rval of 
         Right s -> return (s, signal s)
         Left _  -> throwError BindFailed
@@ -74,12 +74,12 @@ bind (MkListener threadManager) family address port handler = do
         loop socket handler = do (client, address) <- Socket.accept socket
                                  forkIO $ handler client
                                  loop socket handler
-                              `catch` \(e :: SomeException) -> do 
+                              `catch` \(e :: IOException) -> do 
                                  debugLog "Exception raised during accept. Probably just the exit signal."
                                  return ()
 
     signal :: Socket -> IO ()
-    signal s = do infoLog "Closing socket in response shutdown signal"
+    signal s = do infoLog "Closing socket in response to shutdown signal"
                   sClose s
 
     cleanupListener :: Socket -> IO ()
