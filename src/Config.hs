@@ -13,9 +13,9 @@ import Control.Monad.Error
 import Data.Either
 import Data.Word
 import qualified Scripting.Lua as Lua  
-import System.Log.Logger
 
 import LuaUtils
+import qualified Logger as Log
 
 data Config = Config {
   rtspConfig :: !RtspConfig
@@ -76,8 +76,11 @@ readPortTable lua =
                  True -> mapTable lua ((\x -> fromIntegral x) :: Lua.LuaInteger -> Word16)
                  False -> return []
         
+-- ----------------------------------------------------------------------------
+-- ----------------------------------------------------------------------------
+
 debugLog :: String -> IO ()
-debugLog = debugM "config"
+debugLog = Log.debug "  cfg"
 
 infoLog :: String -> IO ()
-infoLog = infoM "config"
+infoLog = Log.info "  cfg"

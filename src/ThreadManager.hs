@@ -41,7 +41,7 @@ import qualified Data.Map as Map
 import Test.HUnit
 import WorkerTypes
 
-import System.Log.Logger
+import qualified Logger as Log
 
 -- | The action to take when a thread crashes - either restart the crashing thread, 
 --   restart all threads or just ignore it and keep on trucking 
@@ -332,7 +332,7 @@ lookupThread tid state = Map.lookup tid (threads state)
 -- ----------------------------------------------------------------------------
 -- Debugging aids
 -- ----------------------------------------------------------------------------
-debugLog = debugM "thrdm" 
+debugLog = Log.debug "thrdm" 
 
 -- ----------------------------------------------------------------------------
 -- Unit Tests
