@@ -113,15 +113,10 @@ bindRtsp listener port cutoff = do
 		handler s = do 
 			RtspConnection.new s cutoff
 			return ()
-
--- |
-split :: Eq a => a -> [a] -> [[a]]
-split delim as = unfoldr (split' delim) as
-  where
-    split' _ [] = Nothing
-    split' d s = 
-      let (h, t) = span (/= d) s 
-      in Just (h, drop 1 t) 
+			
+-- ----------------------------------------------------------------------------
+--
+-- ----------------------------------------------------------------------------
       
 errorLog :: String -> IO ()
 errorLog = Log.err " main"
