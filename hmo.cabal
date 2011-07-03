@@ -1,0 +1,26 @@
+Name:                hmo
+Version:             0.1
+Synopsis:            An ISMA-compliant streaming media server
+Description:         AN RTSP/RTP media server
+License:             GPL-3
+License-file:        LICENSE
+Author:              Trent Clarke
+Maintainer:          trent.clarke@gmail.com
+Category:            Network
+Build-type:          Simple
+Extra-source-files:  config.lua, authentication.lua
+Cabal-version:       >=1.2
+
+
+Executable hmo
+  hs-source-dirs: src
+  Main-is:        Main.hs
+  Build-depends:  base, base64-string, bimap, binary-strict, bytestring,
+                  containers, ghc-binary, haskell98, hslogger, hslua, HUnit, 
+                  MaybeT, MissingH, mtl, network, parsec, stm, stringsearch, 
+                  unix, utf8-string
+  Other-modules:  Authentication, CaseInsensitiveString, Config, Flags, 
+                  Headers, Logger, LuaUtils, Multimap, Parsec, Rtsp,
+                  RtspConnection, ScriptExecutor, ScriptTypes, Sdp, Service, 
+                  Session, SessionDatabase, SessionManager, Signals,
+                  TcpListener, ThreadManager, UnitTests, WorkerPool, WorkerTypes
