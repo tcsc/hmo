@@ -21,9 +21,9 @@ import Data.Typeable
 import qualified Scripting.Lua as Lua  
 import Test.HUnit
 
+import CommonTypes
 import qualified Logger as Log
 import LuaUtils
-import ScriptTypes
 import Flags
 import Service
 

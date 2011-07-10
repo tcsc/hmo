@@ -10,7 +10,7 @@ import Control.Monad.Error
 import Data.Char
 import Test.HUnit  
 
-import ScriptTypes
+import CommonTypes
 
 data AuthInfo = Basic String String
 {-              | Digest { 

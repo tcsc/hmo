@@ -15,10 +15,12 @@ import Numeric
 import Text.Parsec
 import Text.Parsec.Char
 import Test.HUnit
-import Parsec
-
 import Network.URI(parseURI)
 import Network.Socket(Family(..), HostAddress, HostAddress6)
+
+import Parsec
+import CommonTypes
+
 
 data Address = Addr HostAddress
              | Addr6 HostAddress6
@@ -29,9 +31,6 @@ instance Show Address where
   show (Addr addr)     = "(Addr 0x" ++ ((showHex addr) ")")
   show (Addr6 addr)    = "(Addr6 " ++ (show addr) ++ ")"
   show (HostName addr) = "HostName " ++ addr
-
-data MediaType = Audio | Video | Text | Application | Message
-                 deriving(Eq, Show)
 
 data Protocol = Udp | Rtp | SecureRtp | Other String
                 deriving(Eq, Show)
