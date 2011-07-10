@@ -57,7 +57,7 @@ main = withSocketsDo $ do
         installInterruptHandler (interrupt q)
 
         infoLog "Starting Session Manager"
-        sessionManager <- SessionManager.new scripting 4
+        sessionManager <- newSessionManager scripting
 
         infoLog "Creating TCP listener"        
         listener <- newListener
@@ -115,7 +115,7 @@ bindRtsp listener port cutoff = do
 			return ()
 			
 -- ----------------------------------------------------------------------------
---
+-- Logging
 -- ----------------------------------------------------------------------------
       
 errorLog :: String -> IO ()

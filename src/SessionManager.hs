@@ -1,7 +1,7 @@
 module SessionManager(
   SessionManager,
   SessionError(..),
-  SessionManager.new,
+  newSessionManager,
   createSession,
   SessionManager.unitTests
 ) where
@@ -11,88 +11,63 @@ import Control.Concurrent.STM
 import Control.Monad.Error
 import Test.HUnit
 
+import CommonTypes
+import qualified FileSystem as Fs
 import qualified Logger as Log
-import Sdp
-import SessionDatabase
+import Session
+import qualified Sdp as Sdp
 import ScriptExecutor
-import ScriptTypes
-import WorkerPool
-import WorkerTypes
 
-data SessionError = NotFound
+data SessionManager = SM ScriptExecutor (Fs.FileSystem FsNode)
+data SessionError = Unauthorised
+                  | NotImplemented
+                  | NotFound
                   | AlreadyExists
                   | InternalError
-                  | Unauthorised
-                  | UnknownError String  
-                  
+                  | UnknownError String
+
+data FsNode = FsSession Session
+            | FsStream MediaStream
+
 instance Error SessionError where
   noMsg    = UnknownError "A session manager error"
   strMsg s = UnknownError s
 
 type SessionResult a = Either SessionError a 
 type SessionResultIO a = ErrorT SessionError IO a 
- 
-data Header = Auth String
 
-data Msg = CreateSession String Sdp.Description UserId
-         | Setup
+liftSTM :: MonadIO m => STM a -> m a 
+liftSTM = liftIO . atomically
 
-data Rpy = OK  
-         | Error SessionError  
-         | Session
-
-data SessionManager = SM ScriptExecutor (WorkerPool Msg Rpy)
-
-type Headers = [Header]
-
--- | Creates a new session manager that uses the supplied script executor to
---   supply any user data
---
-new :: ScriptExecutor -> Int -> IO SessionManager
-new executor nThreads = do 
-    db <- atomically $ newSessionDatabase
-    pool <- newWorkerPool nThreads setup teardown (call executor db)
-    return $ SM executor pool
-  where
-    setup :: IO ()
-    setup = do
-      debugLog "Entering Session Manager thread"
-      return ()
+liftFs :: Fs.FsResult a -> SessionResultIO a 
+liftFs fsr = do
+  x <- liftIO $ Fs.runFs fsr
+  case x of 
+    Right a -> return a 
+    Left e -> throwError $ translateFs e
     
-    teardown :: () -> IO ()
-    teardown _ = return ()
+translateFs :: Fs.FsError -> SessionError 
+translateFs f = case f of 
+                  Fs.AlreadyExists -> AlreadyExists
+                  _ -> InternalError
 
-    call :: ScriptExecutor -> SessionDatabase -> Msg -> () -> IO (Rpy, ())
-    call scripts sessionDb msg _ = do
-      rpy <- handleMsg scripts sessionDb msg 
-      return (rpy, ())
-
-stopSessionManager :: SessionManager -> IO ()
-stopSessionManager (SM _ pool) = do
-  debugLog "Stopping session manager"
-  stopWorkerPool pool
+newSessionManager :: ScriptExecutor -> IO (SessionManager)
+newSessionManager s = do 
+  fs <- atomically $ Fs.newFileSystem
+  return (SM s fs)
   
-createSession :: SessionManager -> Sdp.Description -> String -> UserId -> IO Rpy
-createSession (SM _ pool) desc path uid = call pool (CreateSession path desc uid)   
-
-translateScriptIO :: ScriptResultIO a -> SessionResultIO a
-translateScriptIO x = do 
-  s <- liftIO $ runErrorT x
-  case s of 
-    Left _ -> throwError InternalError
-    Right a -> return a
-
-handleMsg :: ScriptExecutor -> SessionDatabase -> Msg -> IO Rpy
-handleMsg scripts db (CreateSession path desc uid) = do
-  result <- runErrorT $ do
-    (mountPoint, rights) <- getInfo scripts path uid
-    if Broadcast `elem` rights
-      then return ()
-      else throwError Unauthorised 
-  return $ case result of 
-              Left err -> Error err
-              Right _ -> OK
-
+createSession :: SessionManager -> String -> Sdp.Description -> UserId -> SessionResultIO Session
+createSession (SM scr fs) path desc uid = do
+    (mountPoint, rights) <- getInfo scr path uid
+    if Broadcast `notElem` rights
+      then do liftIO $ debugLog "Not authorised"
+              throwError Unauthorised 
+      else do s <- lift $ newSession desc uid
+              (liftFs $ Fs.register [(path, FsSession s)] fs)  `catchError` \sr -> do liftIO $ deleteSession s
+                                                                                      throwError sr
+              return s
+    
+-- | 
 getInfo :: ScriptExecutor -> String -> UserId -> SessionResultIO (MountPoint, UserRights)
 getInfo scripts path uid = do
     info <- queryInfo
@@ -111,6 +86,14 @@ getInfo scripts path uid = do
     getUserRights :: ScriptExecutor -> UserId -> MountPoint -> ScriptResultIO UserRights
     getUserRights scripts uid mp = 
       queryUserRights scripts uid (mountPointId mp)
+
+translateScriptIO :: ScriptResultIO a -> SessionResultIO a
+translateScriptIO x = do 
+  s <- liftIO $ runErrorT x
+  case s of 
+    Left _ -> throwError InternalError
+    Right a -> return a
+
 
 -- ----------------------------------------------------------------------------
 -- Logging

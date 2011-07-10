@@ -6,7 +6,10 @@ OUT = $(BIN)/hmo
 OPTS = -threaded
 SRCS = $(wildcard $(SRC)/*.hs)
 SBOOT = $(wildcard $(SRC)/*.hs-boot)
-
+PACKAGES = base base64-string bimap binary binary-strict bytestring containers   \
+           ghc-binary haskell98 hslogger hslua HUnit MaybeT MissingH mtl network \
+           parsec stm stringsearch unix utf8-string
+PKGS = $(patsubst %, -package %, $(PACKAGES))
 OBJS = $(patsubst src/%.hs, obj/%.o, $(SRCS))
 
 #$(OUT): $(BIN) $(OBJ) $(SRCS)
@@ -16,28 +19,7 @@ default : $(OUT)
 	@:
 	
 $(OUT): $(OBJS) $(BIN)
-	$(HC) --make $(OPTS) -o $(OUT) \
--package base          \
--package base64-string \
--package bimap         \
--package binary        \
--package binary-strict \
--package bytestring    \
--package containers    \
--package ghc-binary    \
--package haskell98     \
--package hslogger      \
--package hslua         \
--package HUnit         \
--package MaybeT        \
--package MissingH      \
--package mtl           \
--package network       \
--package parsec        \
--package stm           \
--package stringsearch  \
--package unix          \
--package utf8-string $(OBJS)
+	$(HC) --make $(OPTS) -o $(OUT) $(PKGS) $(OBJS)
 
 obj/%.hi : obj/%.o
 	@:

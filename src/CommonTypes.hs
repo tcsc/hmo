@@ -1,6 +1,7 @@
-module ScriptTypes (
+module CommonTypes (
   UserId (..),
   UserInfo (..),
+  MediaType (..),
   MountPoint (..),
   UserRight (..),
   UserRights,
@@ -41,6 +42,9 @@ instance Bounded UserRight where
   maxBound = Broadcast
 
 type UserRights = [UserRight]
+
+data MediaType = Audio | Video | Text | Application | Message
+                 deriving(Eq, Show)
 
 fromUserInfo :: UserInfo -> UserId
 fromUserInfo (User userId userLogin _) = UserId userId userLogin 

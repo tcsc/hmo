@@ -76,7 +76,7 @@ end
 
 mountPoints = {  
   [127] = { 
-    path = "trent",
+    path = "trent.sdp",
     name = "Trent Clarke", 
     description = "Trent's Test Point", 
     broadcasters = mapUsers( {"trent", "test"} ),

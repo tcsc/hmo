@@ -24,11 +24,11 @@ import Network.Socket.ByteString
 import Test.HUnit(Test(..), assertBool, assertEqual)
 
 import Authentication
+import CommonTypes
 import qualified Rtsp as Rtsp
 import qualified Headers as Headers
 import qualified Logger as Log
 import ScriptExecutor
-import ScriptTypes
 import Service
 
 data ConnReply = NoReply
@@ -38,7 +38,7 @@ data ConnReply = NoReply
 
 type ReplyVar = TMVar ConnReply
   
-data ItemToSend = Message Rtsp.Message (Maybe B.ByteString)
+data ItemToSend = MsgItem Rtsp.Message (Maybe B.ByteString)
                 | Packet Rtsp.Packet
                 | QuitWriter
 
@@ -115,10 +115,10 @@ processMessage :: Rtsp.Message -> Maybe B.ByteString -> ConnInfo -> IO ConnInfo
 processMessage rq@(Rtsp.Request sq verb uri version headers) body state = do 
     debugLog $ "Received Msg: " ++ (show rq)
     (r, state') <- do case verb of 
-                       -- Rtsp.Announce -> handleAnnounce rq body state
+                        -- Rtsp.Announce -> handleAnnounce rq body state
                         _ -> notImplemented state
                      `catch` \(e :: ScriptError) -> return (internalServerError sq, state)
-    putItemToSend (Message r Nothing) state'
+    putItemToSend (MsgItem r Nothing) state'
   where
     notImplemented state = return $ (Rtsp.Response sq Rtsp.NotImplemented Headers.empty, state)
 
@@ -127,7 +127,7 @@ badRequest = Rtsp.Response 0 Rtsp.BadRequest Headers.empty
   
 processBadRequest :: ConnInfo -> IO ConnInfo
 processBadRequest state = do
-  state' <- putItemToSend (Message badRequest Nothing) (clearQueue state)
+  state' <- putItemToSend (MsgItem badRequest Nothing) (clearQueue state)
   disconnect state'
   
 disconnect :: ConnInfo -> IO ConnInfo
@@ -142,16 +142,17 @@ clearQueue state = state {sendQueue = []}
 
 -- | Handles an announcement request from an RTSP client.
 --
-
-{-handleAnnounce :: Rtsp.Request -> Maybe B.ByteString -> ConnInfo -> IO ConnInfo
+{-
+handleAnnounce :: Rtsp.Request -> Maybe B.ByteString -> ConnInfo -> IO ConnInfo
 handleAnnounce rq body state = do
   userInfo <- authenticate rq 
   case userInfo of
-    Nothing -> -- generate auth info and response
+    Nothing -> 
     Just userId -> do 
       case Sdp.parse of 
         Nothing -> -- return invalid arg
-        Just desc -> -- post announcement to session manager and see what happens-}
+        Just desc -> -- post announcement to session manager and see what happens 
+-}
 
 liftMaybe :: Monad m => Maybe a -> MaybeT m a 
 liftMaybe = MaybeT . return
@@ -165,7 +166,7 @@ runScript action = do
 
 authenticate :: Rtsp.Message -> ScriptExecutor -> MaybeT IO UserId
 authenticate (Rtsp.Request _ verb uri _ hs) scripts = do
-  authInfo <- liftMaybe $ Headers.get "authorization" hs >>= parseAuthHeader
+  authInfo <- liftMaybe $ Headers.get "Authorisation" hs >>= parseAuthHeader
   userInfo <- runScript $ queryUser scripts (authUser authInfo)
   case checkCreds authInfo userInfo of
     True -> return $ fromUserInfo userInfo
@@ -221,7 +222,7 @@ writer s svc = do
                 writeLoop s svc rx
       
     format :: ItemToSend -> B.ByteString
-    format (Message msg body) = Rtsp.formatMessage msg body
+    format (MsgItem msg body) = Rtsp.formatMessage msg body
     format (Packet p) = Rtsp.formatPacket p
       
 -- | The state block for the reader thread
