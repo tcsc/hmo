@@ -18,7 +18,9 @@ module LuaUtils(
   pushValue,
   string,
   maybeString,
+  maybeTable,
   tableField,
+  readTable,
   unitTests) where
 
 import Control.Exception
@@ -121,6 +123,10 @@ boolean :: LuaValue -> Maybe Bool
 boolean (LBool b) = Just b
 boolean _ = Nothing
 
+maybeTable :: LuaValue -> Maybe LuaTable
+maybeTable (LTable t) = Just t
+maybeTable _ = Nothing
+
 pushValue :: LuaState -> LuaValue -> IO ()
 pushValue lua (LBool b)   = pushboolean lua b
 pushValue lua (LString s) = pushstring lua s
@@ -219,7 +225,6 @@ bracketGlobal lua name action =
     isNil <- liftIO $ isnil lua (-1)
     if isNil then throwError (NotFound name)
              else action)
-
 
 debugLog :: String -> IO ()
 debugLog = debugM "lua"
