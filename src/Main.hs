@@ -61,7 +61,7 @@ main = withSocketsDo $ do
 
         infoLog "Creating TCP listener"        
         listener <- newListener
-        startRtsp listener config
+        startRtsp listener scripting config
   
         infoLog "Entering main processing loop"
         mainLoop q
@@ -70,11 +70,12 @@ main = withSocketsDo $ do
         stopListener listener
         infoLog "Exiting"
   where 
-    startRtsp :: TcpListener -> Config -> IO ()
-    startRtsp listener cfg = do
+    startRtsp :: TcpListener -> ScriptExecutor -> Config -> IO ()
+    startRtsp listener scripts cfg = do
       infoLog "Starting RTSP listeners"
       let rtspCfg = rtspConfig cfg 
-      foldM_ (\_ port -> bindRtsp listener port (rtspCutoff rtspCfg)) 
+      let cutoff = rtspCutoff rtspCfg
+      foldM_ (\_ port -> bindRtsp listener port (onRtspConnection scripts cutoff) ) 
              ()
              (rtspPorts rtspCfg)
     
@@ -83,6 +84,11 @@ main = withSocketsDo $ do
       msg <- atomically $ readTChan q
       case msg of 
         Interrupt -> return () 
+        
+    onRtspConnection :: ScriptExecutor -> Int -> Socket -> IO ()
+    onRtspConnection scriptRunner cutoff s = do 
+      RtspConnection.new s scriptRunner cutoff
+      return () 
       
 logError :: ScriptError -> IO ()
 logError err = do
@@ -105,15 +111,9 @@ setLogger = do
   return ()
 
 -- |
-bindRtsp :: TcpListener -> Word16 -> Int -> IO ()
-bindRtsp listener port cutoff = do 
-  	bind listener AF_INET iNADDR_ANY (fromIntegral port) handler
-  	return ()
-	where 
-		handler s = do 
-			RtspConnection.new s cutoff
-			return ()
-			
+bindRtsp :: TcpListener -> Word16 -> ConnectionHandler -> IO ()
+bindRtsp l port handler = bindListener l AF_INET iNADDR_ANY (fromIntegral port) handler
+  				
 -- ----------------------------------------------------------------------------
 -- Logging
 -- ----------------------------------------------------------------------------

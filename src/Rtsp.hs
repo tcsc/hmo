@@ -13,6 +13,7 @@ module Rtsp (
   formatPacket,
   msgSequence,
   msgHeaders,
+  msgSetHeaders,
   msgContentLength,
   Rtsp.unitTests
 ) where
@@ -40,6 +41,7 @@ import Parsec
 
 data Status = OK
             | BadRequest
+            | AuthorizationRequired
             | NotFound
             | InternalServerError
             | NotImplemented
@@ -77,6 +79,11 @@ msgSequence (Response s _ _) = s
 msgHeaders :: Message -> Headers.Headers
 msgHeaders (Request _ _ _ _ hs) = hs 
 msgHeaders (Response _ _ hs) = hs 
+
+msgSetHeaders :: Message -> [(String, String)] -> Message
+msgSetHeaders (Response cseq stat hs) values = 
+  let hs' = foldl' (\h (n, v) -> Headers.set n v h) hs values
+  in Response cseq stat hs'
 
 msgContentLength :: Message -> Int
 msgContentLength (Request _ _ _ _ hs) = maybe 0 fromIntegral (contentLength hs)
@@ -145,9 +152,9 @@ verb = do
     
 version = do 
   string ("RTSP/")
-  major <- integer
+  major <- decimalInteger
   char '.'
-  minor <- integer
+  minor <- decimalInteger
   return (fromIntegral major, fromIntegral minor) 
 
 -- | 
@@ -253,19 +260,21 @@ hdrSequence = "CSeq"
 hdrContentLength = "Content-Length"
 
 statusDescriptions = Map.fromList $ map (\(s,t) -> (s, Utf8.fromString t)) [ 
-                        (OK,                  "OK"),
-                        (BadRequest,          "BadRequest"),
-                        (NotFound,            "Not Found"),
-                        (InternalServerError, "Internal Server Error"), 
-                        (NotImplemented,      "Not Implemented"),
-                        (BadGateway,          "Bad Gateway"),
-                        (ServiceUnavailable,  "Service Unavailable"),
-                        (GatewayTimeout,      "Gateway Timeout"),
-                        (VersionNotSupported, "RTSP Version Not Supported"),
-                        (OptionNotSupported,  "Option Not Supported") ]
+                        (OK,                    "OK"),
+                        (BadRequest,            "BadRequest"),
+                        (AuthorizationRequired, "Authoraization Required"),
+                        (NotFound,              "Not Found"),
+                        (InternalServerError,   "Internal Server Error"), 
+                        (NotImplemented,        "Not Implemented"),
+                        (BadGateway,            "Bad Gateway"),
+                        (ServiceUnavailable,    "Service Unavailable"),
+                        (GatewayTimeout,        "Gateway Timeout"),
+                        (VersionNotSupported,   "RTSP Version Not Supported"),
+                        (OptionNotSupported,    "Option Not Supported") ]
  
 statusMap = Bimap.fromList [ (200, OK),
                              (400, BadRequest),
+                             (401, AuthorizationRequired),
                              (404, NotFound),
                              (500, InternalServerError), 
                              (501, NotImplemented),

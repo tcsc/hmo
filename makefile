@@ -7,8 +7,8 @@ OPTS = -threaded
 SRCS = $(wildcard $(SRC)/*.hs)
 SBOOT = $(wildcard $(SRC)/*.hs-boot)
 PACKAGES = base base64-string bimap binary binary-strict bytestring containers   \
-           ghc-binary haskell98 hslogger hslua HUnit MaybeT MissingH mtl network \
-           parsec stm stringsearch unix utf8-string
+           ghc-binary haskell98 hex hslogger hslua HUnit MaybeT MissingH mtl     \
+           nano-md5 network parsec stm stringsearch unix utf8-string
 PKGS = $(patsubst %, -package %, $(PACKAGES))
 OBJS = $(patsubst src/%.hs, obj/%.o, $(SRCS))
 
@@ -53,7 +53,6 @@ obj/WorkerPool.o : src/WorkerPool.hs
 obj/WorkerPool.o : obj/WorkerTypes.hi
 obj/Service.o : src/Service.hs
 obj/Service.o : obj/WorkerTypes.hi
-obj/Parsec.o : src/Parsec.hs
 obj/Signals.o : src/Signals.hs
 obj/Multimap.o : src/Multimap.hs
 obj/Flags.o : src/Flags.hs
@@ -73,10 +72,6 @@ obj/CaseInsensitiveString.o : src/CaseInsensitiveString.hs
 obj/Headers.o : src/Headers.hs
 obj/Headers.o : obj/CaseInsensitiveString.hi
 obj/Headers.o : obj/Multimap.hi
-obj/Rtsp.o : src/Rtsp.hs
-obj/Rtsp.o : obj/Parsec.hi
-obj/Rtsp.o : obj/Headers.hi
-obj/Rtsp.o : obj/Multimap.hi
 obj/CommonTypes.o : src/CommonTypes.hs
 obj/ScriptExecutor.o : src/ScriptExecutor.hs
 obj/ScriptExecutor.o : obj/Service.hi
@@ -84,6 +79,11 @@ obj/ScriptExecutor.o : obj/Flags.hi
 obj/ScriptExecutor.o : obj/LuaUtils.hi
 obj/ScriptExecutor.o : obj/Logger.hi
 obj/ScriptExecutor.o : obj/CommonTypes.hi
+obj/Parsec.o : src/Parsec.hs
+obj/Rtsp.o : src/Rtsp.hs
+obj/Rtsp.o : obj/Parsec.hi
+obj/Rtsp.o : obj/Headers.hi
+obj/Rtsp.o : obj/Multimap.hi
 obj/Sdp.o : src/Sdp.hs
 obj/Sdp.o : obj/CommonTypes.hi
 obj/Sdp.o : obj/Parsec.hi
@@ -99,6 +99,7 @@ obj/SessionManager.o : obj/Logger.hi
 obj/SessionManager.o : obj/FileSystem.hi
 obj/SessionManager.o : obj/CommonTypes.hi
 obj/Authentication.o : src/Authentication.hs
+obj/Authentication.o : obj/Parsec.hi
 obj/Authentication.o : obj/CommonTypes.hi
 obj/RtspConnection.o : src/RtspConnection.hs
 obj/RtspConnection.o : obj/Service.hi
