@@ -16,9 +16,10 @@
 
 module TcpListener (
     TcpListener,
+    ConnectionHandler,
     newListener,
     stopListener,
-    bind
+    bindListener
 ) where
 
 import Prelude hiding (catch)
@@ -51,8 +52,8 @@ newListener = do
     return $ MkListener threadManager
 
 -- | Binds to a local address and starts a listener thread
-bind :: TcpListener -> Family -> HostAddress -> PortNumber -> ConnectionHandler -> IO () 
-bind (MkListener threadManager) family address port handler = do  
+bindListener :: TcpListener -> Family -> HostAddress -> PortNumber -> ConnectionHandler -> IO () 
+bindListener (MkListener threadManager) family address port handler = do  
     spawnThread threadManager (initListener family address port) (listenThreadMain handler) cleanupListener Ignore
     return ()
   where

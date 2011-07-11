@@ -60,6 +60,7 @@ data ConnState = ConnAlive
 data ConnInfo = State {
   connSocket      :: !Socket,
   connState       :: !ConnState,
+  scripts         :: !ScriptExecutor,
   readerThread    :: !ThreadId,
   writerThread    :: !ThreadId,
   writerReplyVar  :: !(Maybe (TMVar ItemToSend)),
@@ -80,17 +81,17 @@ instance Error Rtsp.Status where
   
 -- | Spawns a new connection manager thread and returns a RtspConnection that 
 --   can used to address the connection
-new :: Socket -> Int -> IO RtspConnection
-new s maxData = do
-    svc <- newService (newState s maxData) (handleCall) (closeState)
+new :: Socket -> ScriptExecutor -> Int -> IO RtspConnection
+new s scripts maxData = do
+    svc <- newService (newState s scripts maxData) (handleCall) (closeState)
     return $ MkConn svc
   where
-    newState :: Socket -> Int -> RtspSvc -> IO ConnInfo
-    newState sk cutoff svc = do
+    newState :: Socket -> ScriptExecutor -> Int -> RtspSvc -> IO ConnInfo
+    newState sk sr cutoff svc = do
       debugLog "Entering new connection thread"
       readerTid <- forkIO $ reader sk cutoff svc
       writerTid <- forkIO $ writer sk svc
-      return $ State sk ConnAlive readerTid writerTid Nothing [] Map.empty
+      return $ State sk ConnAlive sr readerTid writerTid Nothing [] Map.empty
       
     closeState :: ConnInfo -> IO ()
     closeState state = do 
@@ -115,15 +116,22 @@ processMessage :: Rtsp.Message -> Maybe B.ByteString -> ConnInfo -> IO ConnInfo
 processMessage rq@(Rtsp.Request sq verb uri version headers) body state = do 
     debugLog $ "Received Msg: " ++ (show rq)
     (r, state') <- do case verb of 
-                        -- Rtsp.Announce -> handleAnnounce rq body state
-                        _ -> notImplemented state
+                        Rtsp.Announce -> handleAnnounce rq body state
+                        _ -> notImplemented sq state
                      `catch` \(e :: ScriptError) -> return (internalServerError sq, state)
-    putItemToSend (MsgItem r Nothing) state'
-  where
-    notImplemented state = return $ (Rtsp.Response sq Rtsp.NotImplemented Headers.empty, state)
+    sendResponse r Nothing state'
+   
+sendResponse :: Rtsp.Message -> Maybe B.ByteString -> ConnInfo -> IO ConnInfo
+sendResponse msg body state = do
+  let msg' = Rtsp.msgSetHeaders msg [("Server","HMO server/0.0.1")]
+  putItemToSend (MsgItem msg' body) state
 
 badRequest :: Rtsp.Message    
 badRequest = Rtsp.Response 0 Rtsp.BadRequest Headers.empty
+
+notImplemented :: Int -> ConnInfo -> IO (Rtsp.Message, ConnInfo) 
+notImplemented cseq state = return $ (Rtsp.Response cseq Rtsp.NotImplemented Headers.empty, state)
+
   
 processBadRequest :: ConnInfo -> IO ConnInfo
 processBadRequest state = do
@@ -142,17 +150,15 @@ clearQueue state = state {sendQueue = []}
 
 -- | Handles an announcement request from an RTSP client.
 --
-{-
-handleAnnounce :: Rtsp.Request -> Maybe B.ByteString -> ConnInfo -> IO ConnInfo
-handleAnnounce rq body state = do
-  userInfo <- authenticate rq 
+handleAnnounce :: Rtsp.Message -> Maybe B.ByteString -> ConnInfo -> IO (Rtsp.Message, ConnInfo)
+handleAnnounce rq@(Rtsp.Request cseq _ _ _ _) body state = do
+  userInfo <- runMaybeT $ authenticate rq (scripts state)
   case userInfo of
-    Nothing -> 
-    Just userId -> do 
-      case Sdp.parse of 
-        Nothing -> -- return invalid arg
-        Just desc -> -- post announcement to session manager and see what happens 
--}
+    Nothing -> authRequired rq state 
+    _ -> notImplemented cseq state
+
+authRequired (Rtsp.Request cseq _ _ _ _) state = 
+  return $ (Rtsp.Response cseq Rtsp.AuthorizationRequired Headers.empty, state)
 
 liftMaybe :: Monad m => Maybe a -> MaybeT m a 
 liftMaybe = MaybeT . return
@@ -168,7 +174,7 @@ authenticate :: Rtsp.Message -> ScriptExecutor -> MaybeT IO UserId
 authenticate (Rtsp.Request _ verb uri _ hs) scripts = do
   authInfo <- liftMaybe $ Headers.get "Authorisation" hs >>= parseAuthHeader
   userInfo <- runScript $ queryUser scripts (authUser authInfo)
-  case checkCreds authInfo userInfo of
+  case checkCreds "/" "ANNOUNCE" authInfo userInfo of
     True -> return $ fromUserInfo userInfo
     False -> fail ""
   

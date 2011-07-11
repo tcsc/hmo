@@ -88,7 +88,8 @@ data Description = SD {
       sessionStreams :: [MediaStream],
       sessionRtpMap  :: !RtpMap,
       sessionFmtMap  :: !FmtMap
-    } deriving (Eq, Show)
+    }
+    deriving (Eq, Show)
   
 parseSdp :: B.ByteString -> Maybe Description
 parseSdp s =
@@ -149,16 +150,16 @@ sdpLine = version <|> originator <|> name <|> info <|> Sdp.uri <|> email <|>
 version = do 
   char 'v'
   char '='
-  n <- integer
+  n <- decimalInteger
   return $! Version n
   
 originator = do 
   char 'o'
   char '='
   userName   <- manyTill anyChar space
-  sessionId  <- integer
+  sessionId  <- decimalInteger
   space
-  sessionVer <- integer
+  sessionVer <- decimalInteger
   space
   string "IN"
   space
@@ -206,9 +207,9 @@ connectionData = do
 timing = do
   char 't'
   char '='
-  start <- integer
+  start <- decimalInteger
   space
-  stop <- integer
+  stop <- decimalInteger
   return $! Timing start stop
   
 repeatTiming = do
@@ -222,7 +223,7 @@ repeatTiming = do
   return $ RepeatTiming interval duration offsets
 
 timeSpan = do
-  i <- integer
+  i <- decimalInteger
   scale <- (char 'd' >> return 86400) <|> 
            (char 'h' >> return 3600) <|> 
            (char 'm' >> return 60) <|> 
@@ -234,7 +235,7 @@ timeSpan = do
 bandwidth = do
   s <- many1 (noneOf ":")
   char ':'
-  i <- integer
+  i <- decimalInteger
   let mode = case s of
               "CT" -> ConfidenceTotal
               "AS" -> ApplicationSpecific
@@ -246,13 +247,13 @@ mediaDescription = do
     char '='
     mt <- mediaType
     space
-    port <- integer
+    port <- decimalInteger
     c <- addressParam <|> return Nothing
     let ports = reverse $ unfoldr (unpack port) $ maybe 1 (fromIntegral) c
     space
     p <- protocol
     space 
-    fmt <- many1 $ do x <- integer
+    fmt <- many1 $ do x <- decimalInteger
                       many space
                       return (fromIntegral x)
     return $! Media $ Stream mt ports p fmt
@@ -271,11 +272,11 @@ attribute = do
     _ -> return $! Attribute s
 
 rtpMap = do
-    fmtId <- integer
+    fmtId <- decimalInteger
     space
     encoding <- many1 (noneOf "/ \t")
     char '/'
-    clock <- integer
+    clock <- decimalInteger
     args <- args <|> return ""
     return $ RtpP $ RtpParams (fromIntegral fmtId) encoding (fromIntegral clock) args
   where
@@ -285,7 +286,7 @@ rtpMap = do
       return s 
 
 formatp = do 
-  fmtId <- integer
+  fmtId <- decimalInteger
   space 
   s <- many1 (noneOf "\r\n")
   return $ FmtP (fromIntegral fmtId) s
@@ -310,7 +311,7 @@ protocol = do
   
 addressParam = do 
   char '/'
-  n <- integer
+  n <- decimalInteger
   return $ Just (fromIntegral n) 
   
 addressFamily = do
@@ -323,13 +324,13 @@ addressFamily = do
 address = ip4Addr <|> ip6Addr <|> hostName
 
 ip4Addr = do
-  a <- integer
+  a <- decimalInteger
   char '.'
-  b <- integer
+  b <- decimalInteger
   char '.'
-  c <- integer
+  c <- decimalInteger
   char '.'
-  d <- integer
+  d <- decimalInteger
   return $ Addr $ ((fromIntegral a) `shiftL` 24) .|. 
                   ((fromIntegral b) `shiftL` 16) .|. 
                   ((fromIntegral c) `shiftL` 8) .|. 

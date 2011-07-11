@@ -1,8 +1,15 @@
 {-# LANGUAGE FlexibleContexts #-}
 
-module Parsec(uri, integer, maybeInt, isImplicit, URI) where
+module Parsec(
+  uri, 
+  decimalInteger,
+  hexInteger, 
+  maybeInt, 
+  isImplicit, 
+  URI) where
 
 import Network.URI  
+import Data.Char (digitToInt)
 import Text.Parsec
 import Text.Parsec.Combinator
 import Text.Parsec.Char
@@ -21,7 +28,17 @@ integer = do
   case maybeInt t of 
     Just n -> return n
     Nothing -> fail "Integer"
+    
+decimalInteger :: (Stream s m Char) => ParsecT s u m Integer
+decimalInteger = number 10 digit
 
+hexInteger :: (Stream s m Char) => ParsecT s u m Integer
+hexInteger = number 16 hexDigit
+
+number base baseDigit = do 
+  digits <- many1 baseDigit
+  let n = foldl (\x d -> base*x + toInteger (digitToInt d)) 0 digits
+  seq n (return n)
 
 isImplicit p s = do
   pos <- getPosition 
