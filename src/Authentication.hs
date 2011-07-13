@@ -17,9 +17,9 @@ module Authentication (
   
 import Codec.Binary.Base64.String
 import Control.Monad.Error
-import qualified Data.ByteString.Char8 as B
+import qualified Data.ByteString.Lazy.Char8 as LB8
 import Data.Char
-import Data.Digest.OpenSSL.MD5
+import Data.Digest.Pure.MD5
 import qualified Data.Hex as Hex
 import Data.Char
 import Data.Maybe
@@ -267,7 +267,7 @@ construct :: [String] -> String
 construct = intercalate ":"
 
 hash :: String -> String
-hash = (md5sum . B.pack)
+hash = show . md5 . LB8.pack
 
 hashConstruct :: [String] -> String 
 hashConstruct =  hash . construct
