@@ -1,3 +1,4 @@
+UNAME := $(shell uname -o)
 SRC = src
 OBJ = obj
 HC = ghc
@@ -8,8 +9,16 @@ SRCS = $(wildcard $(SRC)/*.hs)
 SBOOT = $(wildcard $(SRC)/*.hs-boot)
 PACKAGES = base base64-string bimap binary binary-strict bytestring containers   \
            ghc-binary haskell98 hex hslogger hslua HUnit MaybeT MissingH mtl     \
-           nano-md5 network parsec stm stringsearch unix utf8-string
-PKGS = $(patsubst %, -package %, $(PACKAGES))
+           network parsec pureMD5 stm stringsearch utf8-string
+
+# platform-specific changes
+ifeq ($(UNAME), MinGW)
+SYSPACKAGES = Win32
+else
+SYSPACKAGES = unix
+endif
+
+PKGS = $(patsubst %, -package %, $(PACKAGES) $(SYSPACKAGES))
 OBJS = $(patsubst src/%.hs, obj/%.o, $(SRCS))
 
 #$(OUT): $(BIN) $(OBJ) $(SRCS)
@@ -17,7 +26,7 @@ OBJS = $(patsubst src/%.hs, obj/%.o, $(SRCS))
 
 default : $(OUT)
 	@:
-	
+
 $(OUT): $(OBJS) $(BIN)
 	$(HC) --make $(OPTS) -o $(OUT) $(PKGS) $(OBJS)
 
