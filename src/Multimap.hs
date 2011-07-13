@@ -5,6 +5,7 @@ module Multimap (
   lookup,
   insert,
   fold,
+  Multimap.map,
   unitTests) where
   
 import Prelude hiding (lookup)
@@ -42,6 +43,10 @@ fold f acc (MM m) = Map.foldrWithKey foldSet acc m
   where 
     foldSet key setV acc = Set.fold (\val a -> f (key, val) a) acc setV
 
+map :: ((k,v) -> a) -> Multimap k v -> [a]
+map f (MM m) = concat $ List.map mapSet $ Map.assocs m
+  where
+    mapSet (key,set) = Set.fold (\val acc -> let x = f (key, val) in (x:acc)) [] set 
 
 -- ----------------------------------------------------------------------------
 --  Unit Tests

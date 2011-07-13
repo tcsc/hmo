@@ -11,6 +11,7 @@ module CommonTypes (
 import Data.Bits
 
 data UserId = UserId Int String
+            deriving (Show)
 
 data UserInfo = User { 
   userId :: !Int,

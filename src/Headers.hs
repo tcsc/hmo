@@ -4,9 +4,11 @@ module Headers(Headers,
                getHeaders,
                set,
                fold,
+               Headers.map,
                Headers.unitTests) 
 where 
 
+import qualified Data.List as List
 import qualified Multimap as MM
 import CaseInsensitiveString
 import Test.HUnit
@@ -18,7 +20,7 @@ empty :: Headers
 empty = HS MM.empty
 
 fromList :: [(String,String)] -> Headers
-fromList hs = HS $ MM.fromList $ map (\(h,v) -> (fromString h, v)) hs
+fromList hs = HS $ MM.fromList $ List.map (\(h,v) -> (fromString h, v)) hs
   
 -- | Fetches a single header value from a header collection
 get :: String -> Headers -> Maybe String
@@ -37,6 +39,9 @@ getHeaders h (HS mmap) = MM.lookup (fromString h) mmap
 -- | Implements a basic fold over the entire set of headers
 fold :: ((String, String) -> a -> a) -> a -> Headers -> a
 fold f seed (HS mmap) = MM.fold (\(h,v) acc -> f (asString h, v) acc) seed mmap 
+
+map :: ((String, String) -> a) -> Headers -> [a]
+map f (HS mmap) = MM.map  (\(h,v) -> f(asString h, v)) mmap
 
 -- ----------------------------------------------------------------------------
 --  Unit Tests

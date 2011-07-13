@@ -3,6 +3,9 @@
 module Authentication (
   AuthInfo,
   AuthContext,
+  AuthFailure (..),
+  AuthResult,
+  AuthResultIO,
   parseAuthHeader,
   checkCreds,
   authUser,
@@ -18,6 +21,7 @@ import qualified Data.ByteString.Char8 as B
 import Data.Char
 import Data.Digest.OpenSSL.MD5
 import qualified Data.Hex as Hex
+import Data.Char
 import Data.Maybe
 import Data.List
 import Data.List.Utils
@@ -27,6 +31,7 @@ import System.Random
 import Test.HUnit
 import Text.Parsec
 import Text.Parsec.Char
+import Text.Printf
 
 import CommonTypes
 import Parsec
@@ -34,22 +39,33 @@ import Parsec
 data AuthInfo = Basic String String
               | Digest [DigestElement]
               deriving (Show, Eq)
-                         
+
+data QualityOfProtection = QopAuth
+                         | QopAuthInt
+                         | QopOther String
+                         | QopNone
+                         deriving (Show, Eq)
+
 data DigestElement = DigRealm String
                    | DigNonce String
                    | DigUserName String
                    | DigClientNonce String
-                   | DigResponse B.ByteString
+                   | DigResponse String
                    | DigURI String
                    | DigNonceCount Integer
-                   | DigOpaque String
+                   | DigOpaque String 
+                   | DigQop QualityOfProtection
                    | DigUnsupported String String
                    deriving (Show, Eq)
                          
 data AuthFailure = UnsupportedMechanism
                  | ProtocolFailure
-                 | Mismatch
                  | Stale
+                 | MalformedAuthRequest
+                 | BadCredentials
+                 | UnsupportedQoP
+                 | MissingAuthorisation
+                 | NoSuchUser
                  deriving (Read, Show, Eq)
                  
 data AuthContext = AuthContext {
@@ -64,6 +80,7 @@ instance Error AuthFailure where
   strMsg x = read x
 
 type AuthResult = Either AuthFailure
+type AuthResultIO = ErrorT AuthFailure IO
 
 newAuthContext :: String -> Int -> IO AuthContext
 newAuthContext realm lifeSpan = do 
@@ -103,17 +120,41 @@ authUser (Basic name _) = name
 authUser (Digest es) = maybe "" (\(DigUserName n) -> n) $ find isDigestUser es  
 
 -- | Check the credentials of 
-checkCreds :: String -> String -> AuthInfo -> UserInfo -> Bool
-checkCreds _ _ (Basic _ pwd) uid = (pwd == userPassword uid)
-checkCreds realm method (Digest es) (User _ uid pwd) = 
-  maybe False id $ do
-    uri <- find isDigestURI es >>= \(DigURI u) -> return u
-    response <- find isDigestResponse es >>= \(DigResponse r) -> return r
-    let a1 = hashConcat [uid,realm,pwd]
-    let a2 = hashConcat [method,uri]
-    let expected = hashConcat [a1, a2]
-    return $ response == (B.pack expected)
+checkCreds :: String -> AuthInfo -> UserInfo -> AuthContext -> AuthResult Bool
+checkCreds _ (Basic _ pwd) uid _ = return (pwd == userPassword uid)
+checkCreds method (Digest es) (User _ uid pwd) ctx = do
+    uri      <- getElement isDigestURI unpackURI
+    response <- getElement isDigestResponse unpackResponse
+    nonce    <- getElement isDigestNonce unpackNonce
+    cnonce   <- getElement isDigestCNonce unpackCNonce
+    nc       <- getElement isDigestNonceCount unpackNonceCount
+    qop      <- getQop
+    
+    let a1 = (hash . construct) [uid, (ctxRealm ctx), pwd]
+    let a2 = (hash . construct) [method,uri]
 
+    let expected = (hash . construct) $ 
+          if qop == QopNone 
+            then [a1, nonce, a2]
+            else [a1, nonce, printf "%08x" nc, cnonce, fmtQop qop, a2]
+                                                 
+    if (response /= expected) then throwError BadCredentials
+                              else if nonce /= (ctxNonce ctx)
+                                then throwError Stale 
+                                else return True
+  where
+    getQop :: AuthResult QualityOfProtection
+    getQop = do 
+      case find isDigestQop es of
+        Nothing -> return QopNone
+        Just (DigQop qop) -> case qop of 
+                               QopOther _ -> throwError UnsupportedQoP 
+                               q -> return q
+                            
+    getElement :: (DigestElement -> Bool) -> (DigestElement -> a) -> AuthResult a
+    getElement idtor extractor = maybe (Left MalformedAuthRequest) (Right . extractor) $ find idtor es
+
+    
 parseBasic p =
   let (name,pwd) = (cleave (== ':') . decode) p
   in if (name == []) || (pwd == []) 
@@ -157,6 +198,29 @@ isDigestURI :: DigestElement -> Bool
 isDigestURI (DigURI _) = True
 isDigestURI _ = False
 
+isDigestQop :: DigestElement -> Bool
+isDigestQop (DigQop _) = True
+isDigestQop _ = False
+
+isDigestNonce :: DigestElement -> Bool
+isDigestNonce (DigNonce _) = True
+isDigestNonce _ = False
+
+isDigestCNonce :: DigestElement -> Bool
+isDigestCNonce (DigClientNonce _) = True
+isDigestCNonce _ = False
+
+isDigestNonceCount :: DigestElement -> Bool
+isDigestNonceCount (DigNonceCount _) = True
+isDigestNonceCount _ = False
+
+
+unpackURI (DigURI u) = u
+unpackResponse (DigResponse r) = r
+unpackNonce (DigNonce n) = n
+unpackCNonce (DigClientNonce n) = n
+unpackNonceCount (DigNonceCount nc) = nc
+
 parseDigest p = case parse digest "" p of 
                   Right items -> Just $ Digest items
                   Left _ -> Nothing
@@ -166,7 +230,7 @@ digest = many $ do l <- digestElement
                    return l
 
 digestElement = realm <|> nonce <|> cnonce <|> nonceCount <|> userName <|> 
-                response <|> digUri <|> opaque <|> unsupported
+                response <|> digUri <|> opaque <|> qop <|> unsupported
                 
 userName = stringValue "username" DigUserName
 realm    = stringValue "realm" DigRealm
@@ -188,15 +252,35 @@ nonceCount = do try $ string "nc"
 response = do { try $ string "response";
                 char '=';
                 s <- optionallyQuoted $ many1 hexDigit;
-                bs <- (Hex.unhex . B.pack) s;
-                return $ DigResponse bs; }
+                return $ DigResponse s; }
 
-hashConcat :: [String] -> String 
-hashConcat ss =  (md5sum . B.pack) $ intercalate ":" ss
+qop = do try $ string "qop"
+         char '='
+         s <- optionallyQuoted authToken
+         let q = case map toLower s of 
+                   "auth" -> QopAuth
+                   "auth-int" -> QopAuthInt
+                   _ -> QopOther s
+         return $ DigQop $! q 
+         
+construct :: [String] -> String 
+construct = intercalate ":"
+
+hash :: String -> String
+hash = (md5sum . B.pack)
+
+hashConstruct :: [String] -> String 
+hashConstruct =  hash . construct
 
 -- ----------------------------------------------------------------------------
 -- Utilities
 -- ----------------------------------------------------------------------------
+
+fmtQop :: QualityOfProtection -> String
+fmtQop qop = case qop of
+              QopAuth -> "auth"
+              QopAuthInt -> "auth-int"
+              QopOther s -> s
 
 optionallyQuoted p = do q <- optionMaybe $ char '\"';
                         v <- p
@@ -244,15 +328,26 @@ digestTextExpected = Digest [ DigUserName "Mufasa",
                               DigRealm "testrealm@host.com",
                               DigNonce "dcd98b7102dd2f0e8b11d0f600bfb0c093",
                               DigURI "/dir/index.html",
-                              DigUnsupported "qop" "auth",
+                              DigQop QopAuth,
                               DigNonceCount 1,
                               DigClientNonce "0a4f113b",
-                              DigResponse (fromJust $ (Hex.unhex . B.pack) "6629fae49393a05397450978507c4ef1"),
-                              DigOpaque "5ccc069c403ebaf9f0171e9517f40e41"]
+                              DigResponse "6629fae49393a05397450978507c4ef1",
+                              DigOpaque "5ccc069c403ebaf9f0171e9517f40e41" ]
+
+testAuthentication :: Assertion
+testAuthentication = do
+    let uid = User 0 "Mufasa" "narfity narf" -- "Circle Of Life"
+    let realm = "testrealm@host.com"
+    ctx <- makeContext realm
+    assertEqual "Authentication Failed" (Right True) $ checkCreds "GET" digestTextExpected uid $! ctx
+  where 
+    makeContext r = do 
+      ctx <- newAuthContext r 10
+      return ctx { ctxNonce = "dcd98b7102dd2f0e8b11d0f600bfb0c093" } 
 
 basicTests = TestList [
   "Basic Parsing" ~: Just (Basic "Aladdin" "open sesame") ~=? parseAuthHeader "Basic QWxhZGRpbjpvcGVuIHNlc2FtZQ==",
-  "Digest Parsing" ~: Just digestTextExpected ~=? parseAuthHeader digestTestHeader
-  ]
+  "Digest Parsing" ~: Just digestTextExpected ~=? parseAuthHeader digestTestHeader,
+  TestCase testAuthentication]
   
 unitTests = TestList [basicTests]

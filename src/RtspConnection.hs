@@ -164,10 +164,14 @@ clearQueue state = state {sendQueue = []}
 --
 handleAnnounce :: Rtsp.Message -> Maybe B.ByteString -> ConnInfo -> IO (Rtsp.Message, ConnInfo)
 handleAnnounce rq@(Rtsp.Request cseq _ _ _ _) body state = do
-  userInfo <- runMaybeT $ authenticate rq state
+  userInfo <- runErrorT $ authenticate rq state
+  debugLog $ "Authentication returned: " ++ (show userInfo)
   case userInfo of
-    Nothing -> authRequired rq state 
-    _ -> notImplemented cseq state
+    Right uid -> notImplemented cseq state 
+    Left MissingAuthorisation -> authRequired rq state
+    Left BadCredentials -> authRequired rq state
+    Left MalformedAuthRequest -> return (badRequest, state) 
+    _ -> return (badRequest, state)
 
 -- | Generates an RTSP "authorization required" response, updating the
 --   connection state with a new authentication context if need be.
@@ -207,18 +211,23 @@ runScript action = do
 -- | Authentcates a user - i.e. checks that the user exists and that their
 --   credentials match.
 --
-authenticate :: Rtsp.Message -> ConnInfo -> MaybeT IO UserId
+authenticate :: Rtsp.Message -> ConnInfo -> AuthResultIO UserId
 authenticate (Rtsp.Request _ verb uri _ hs) state = do
-  let realm = (svrRealm . svrInfo) state
-  let scripts = (svrScripts . svrInfo) state
-  let context  = connAuthCtx state
-  isStale <- (lift . contextIsStale) context
-  if isStale then fail ""
-             else do response <- liftMaybe $ Headers.get "Authorisation" hs >>= parseAuthHeader
-                     userInfo <- runScript $ queryUser scripts (authUser response)
-                     case checkCreds realm verb response userInfo of
-                       True -> return $ fromUserInfo userInfo
-                       False -> fail ""
+    let realm = (svrRealm . svrInfo) state
+    let scripts = (svrScripts . svrInfo) state
+    let context  = connAuthCtx state
+    response <- getResponse
+    userInfo <- lift . runMaybeT $ runScript $ queryUser scripts (authUser response)
+    case userInfo of 
+      Nothing -> throwError NoSuchUser
+      Just user -> do result <- ErrorT . return $ checkCreds verb response user context
+                      return $ fromUserInfo user
+  where 
+    getResponse = case Headers.get "Authorization" hs >>= parseAuthHeader of
+                    Just r -> return r
+                    Nothing -> throwError MissingAuthorisation
+    
+    
 -- | 
 internalServerError :: Int -> Rtsp.Message
 internalServerError sq = Rtsp.Response sq Rtsp.InternalServerError Headers.empty
