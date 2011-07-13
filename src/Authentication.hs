@@ -1,16 +1,16 @@
 {-# LANGUAGE FlexibleContexts #-}
 
-module Authentication 
-
-{- (
+module Authentication (
   AuthInfo,
+  AuthContext,
   parseAuthHeader,
   checkCreds,
   authUser,
-) 
--}
-
-where
+  newAuthContext,
+  refreshAuthContext,
+  contextIsStale,
+  genAuthHeaders,
+) where
   
 import Codec.Binary.Base64.String
 import Control.Monad.Error
@@ -21,6 +21,9 @@ import qualified Data.Hex as Hex
 import Data.Maybe
 import Data.List
 import Data.List.Utils
+import Data.Time.Clock
+import Data.Time.Clock.POSIX
+import System.Random
 import Test.HUnit
 import Text.Parsec
 import Text.Parsec.Char
@@ -46,13 +49,47 @@ data DigestElement = DigRealm String
 data AuthFailure = UnsupportedMechanism
                  | ProtocolFailure
                  | Mismatch
+                 | Stale
                  deriving (Read, Show, Eq)
+                 
+data AuthContext = AuthContext {
+  ctxRealm    :: !String,
+  ctxNonce    :: !String,
+  ctxExpiry   :: POSIXTime,
+  ctxLifespan :: !Int,
+  ctxRng      :: !StdGen
+}
 
 instance Error AuthFailure where
   strMsg x = read x
 
 type AuthResult = Either AuthFailure
 
+newAuthContext :: String -> Int -> IO AuthContext
+newAuthContext realm lifeSpan = do 
+  now <- getPOSIXTime 
+  let rng = mkStdGen $ (truncate . (* 1000) . toRational) now
+  refreshAuthContext $ AuthContext realm "" 0 lifeSpan rng
+
+contextIsStale :: AuthContext -> IO Bool
+contextIsStale ctx = do now <- getPOSIXTime
+                        return $ now > (ctxExpiry ctx)
+
+refreshAuthContext :: AuthContext -> IO AuthContext
+refreshAuthContext context = do 
+    now <- getPOSIXTime
+    return $ refreshCtx now context 
+  where
+    refreshCtx now ctx = let rng = (ctxRng ctx)
+                             lifespan = (ctxLifespan ctx)
+                             (rng',nonce) = randomString rng 32
+                             expiry = (now + fromIntegral lifespan)
+                          in ctx { ctxNonce = nonce, ctxExpiry = expiry, ctxRng = rng' }
+
+genAuthHeaders :: AuthContext -> (AuthContext, [String])
+genAuthHeaders ctx = let (ctx', digest) = genDigestHeader ctx
+                     in (ctx', [digest])
+                                           
 parseAuthHeader :: String -> Maybe AuthInfo
 parseAuthHeader s = 
   let (name, payload) = cleave (== ' ') s
@@ -65,6 +102,7 @@ authUser :: AuthInfo -> String
 authUser (Basic name _) = name
 authUser (Digest es) = maybe "" (\(DigUserName n) -> n) $ find isDigestUser es  
 
+-- | Check the credentials of 
 checkCreds :: String -> String -> AuthInfo -> UserInfo -> Bool
 checkCreds _ _ (Basic _ pwd) uid = (pwd == userPassword uid)
 checkCreds realm method (Digest es) (User _ uid pwd) = 
@@ -82,9 +120,30 @@ parseBasic p =
         then Nothing
         else Just $ Basic name pwd 
 
+-- | generates an 'n' character long random string for use with the
+--   authentication
+randomString gen n = foldl' rchar (gen,[]) [0..(n-1)] 
+  where rchar :: RandomGen g => (g,[Char]) -> a -> (g,[Char]) 
+        rchar (g,cs) _ = let (c, g') = randomR ('a','z') g 
+                         in (g', c : cs)
+
 -- ----------------------------------------------------------------------------
 -- Digest authentication
 -- ----------------------------------------------------------------------------
+
+genDigestHeader :: AuthContext -> (AuthContext, String)
+genDigestHeader ctx = 
+  let realm = ctxRealm ctx
+      nonce = ctxNonce ctx
+      rng = ctxRng ctx
+      (rng',opaque) = randomString rng 64
+      header = "Digest " ++
+                "realm=\"" ++ realm ++ "\", " ++
+                "nonce=\"" ++ nonce ++ "\", " ++
+                "opaque=\"" ++ opaque ++ "\", " ++ 
+                "qop=auth"
+  in (ctx {ctxRng = rng'}, header)
+                        
 
 isDigestUser :: DigestElement -> Bool
 isDigestUser (DigUserName _) = True
@@ -97,8 +156,6 @@ isDigestResponse _ = False
 isDigestURI :: DigestElement -> Bool
 isDigestURI (DigURI _) = True
 isDigestURI _ = False
-
-
 
 parseDigest p = case parse digest "" p of 
                   Right items -> Just $ Digest items

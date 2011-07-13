@@ -59,9 +59,11 @@ main = withSocketsDo $ do
         infoLog "Starting Session Manager"
         sessionManager <- newSessionManager scripting
 
+        let rtspInfo = serverInfo scripting config 
+
         infoLog "Creating TCP listener"        
         listener <- newListener
-        startRtsp listener scripting config
+        startRtsp listener rtspInfo config
   
         infoLog "Entering main processing loop"
         mainLoop q
@@ -70,12 +72,17 @@ main = withSocketsDo $ do
         stopListener listener
         infoLog "Exiting"
   where 
-    startRtsp :: TcpListener -> ScriptExecutor -> Config -> IO ()
-    startRtsp listener scripts cfg = do
+    serverInfo scripts cfg = let rtspCfg = rtspConfig cfg
+                                 realm = rtspRealm rtspCfg
+                                 svr = rtspServerString rtspCfg
+                             in SvcInf realm svr scripts
+
+    startRtsp :: TcpListener -> ServerInfo -> Config -> IO ()
+    startRtsp listener info cfg = do
       infoLog "Starting RTSP listeners"
       let rtspCfg = rtspConfig cfg 
       let cutoff = rtspCutoff rtspCfg
-      foldM_ (\_ port -> bindRtsp listener port (onRtspConnection scripts cutoff) ) 
+      foldM_ (\_ port -> bindRtsp listener port (onRtspConnection info cutoff) ) 
              ()
              (rtspPorts rtspCfg)
     
@@ -85,9 +92,9 @@ main = withSocketsDo $ do
       case msg of 
         Interrupt -> return () 
         
-    onRtspConnection :: ScriptExecutor -> Int -> Socket -> IO ()
-    onRtspConnection scriptRunner cutoff s = do 
-      RtspConnection.new s scriptRunner cutoff
+    onRtspConnection :: ServerInfo -> Int -> Socket -> IO ()
+    onRtspConnection info cutoff s = do 
+      RtspConnection.new s info cutoff
       return () 
       
 logError :: ScriptError -> IO ()
@@ -95,6 +102,7 @@ logError err = do
   let msg = case err of
               SyntaxError s ->  "script syntax error: " ++ s
               RuntimeError s -> "script runtime error: " ++ s
+              s -> show s
   errorLog msg
               
       

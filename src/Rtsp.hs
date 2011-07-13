@@ -62,7 +62,7 @@ data Verb = Describe | Announce | Setup | Play | Teardown | OtherVerb String
 
 type Version = (Int, Int)
 
-data Message = Request Int Verb URI Version Headers.Headers
+data Message = Request Int String URI Version Headers.Headers
              | Response Int Status Headers.Headers
              
 data Packet = Packet Int B.ByteString deriving (Show)
@@ -124,7 +124,7 @@ contentLength hs = case (Headers.get "content-length" hs) of
                      Just txt -> maybeInt txt
       
 request = do 
-  v <- verb
+  v <- many1 letter --verb
   spaces
   u <- uri
   spaces
@@ -294,7 +294,7 @@ testParseMinimalRequest = TestCase(do
   assertBool "Parse Success" (isJust mmsg)
   let (Request sq verb uri ver hdr) = fromJust mmsg
   assertEqual "sequence" 1 sq
-  assertEqual "verb" Describe verb
+  assertEqual "verb" "DESCRIBE" verb
   assertEqual "version" (1,0) ver
   assertEqual "contentLength" 0 (maybe 0 (id) (contentLength hdr)))
 

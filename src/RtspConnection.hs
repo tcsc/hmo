@@ -1,6 +1,7 @@
 {-# LANGUAGE DeriveDataTypeable, ScopedTypeVariables #-}
 
 module RtspConnection(
+  ServerInfo (..),
   RtspConnection,
   RtspConnection.new,
   RtspConnection.unitTests
@@ -17,6 +18,7 @@ import Control.Monad.Trans
 import qualified Data.ByteString as B
 import qualified Data.ByteString.UTF8 as Utf8
 import qualified Data.Map as Map
+import Data.List
 import Data.Maybe
 import Data.Typeable
 import Network.Socket hiding (send, sendTo, recv, recvFrom)
@@ -55,17 +57,26 @@ data ConnMsg = Hello ReplyVar
 data ConnState = ConnAlive
                | ShuttingDown
                deriving (Show, Eq)
-           
+  
+-- | Global service information that is applicable to (and shared by) all
+--   connections
+data ServerInfo =  SvcInf {
+  svrRealm   :: !String,
+  svrVersion :: !String,
+  svrScripts :: !ScriptExecutor
+}
+
 -- | Defines a state block for the connection.
 data ConnInfo = State {
   connSocket      :: !Socket,
   connState       :: !ConnState,
-  scripts         :: !ScriptExecutor,
+  svrInfo         :: !ServerInfo,
   readerThread    :: !ThreadId,
   writerThread    :: !ThreadId,
   writerReplyVar  :: !(Maybe (TMVar ItemToSend)),
   sendQueue       :: ![ItemToSend],
-  pendingMessages :: !(Map.Map Int Rtsp.Message)
+  pendingMessages :: !(Map.Map Int Rtsp.Message),
+  connAuthCtx     :: !AuthContext
 }
 
 type RtspSvc = Service ConnMsg ConnReply ConnInfo
@@ -81,17 +92,18 @@ instance Error Rtsp.Status where
   
 -- | Spawns a new connection manager thread and returns a RtspConnection that 
 --   can used to address the connection
-new :: Socket -> ScriptExecutor -> Int -> IO RtspConnection
-new s scripts maxData = do
-    svc <- newService (newState s scripts maxData) (handleCall) (closeState)
+new :: Socket -> ServerInfo -> Int -> IO RtspConnection
+new s svrInfo maxData = do
+    svc <- newService (newState s svrInfo maxData) (handleCall) (closeState)
     return $ MkConn svc
   where
-    newState :: Socket -> ScriptExecutor -> Int -> RtspSvc -> IO ConnInfo
-    newState sk sr cutoff svc = do
+    newState :: Socket -> ServerInfo -> Int -> RtspSvc -> IO ConnInfo
+    newState sk svr cutoff svc = do
       debugLog "Entering new connection thread"
       readerTid <- forkIO $ reader sk cutoff svc
       writerTid <- forkIO $ writer sk svc
-      return $ State sk ConnAlive sr readerTid writerTid Nothing [] Map.empty
+      authCtx <- newAuthContext (svrRealm svrInfo) 30
+      return $ State sk ConnAlive svr readerTid writerTid Nothing [] Map.empty authCtx
       
     closeState :: ConnInfo -> IO ()
     closeState state = do 
@@ -116,14 +128,14 @@ processMessage :: Rtsp.Message -> Maybe B.ByteString -> ConnInfo -> IO ConnInfo
 processMessage rq@(Rtsp.Request sq verb uri version headers) body state = do 
     debugLog $ "Received Msg: " ++ (show rq)
     (r, state') <- do case verb of 
-                        Rtsp.Announce -> handleAnnounce rq body state
+                        "ANNOUNCE" -> handleAnnounce rq body state
                         _ -> notImplemented sq state
                      `catch` \(e :: ScriptError) -> return (internalServerError sq, state)
     sendResponse r Nothing state'
    
 sendResponse :: Rtsp.Message -> Maybe B.ByteString -> ConnInfo -> IO ConnInfo
 sendResponse msg body state = do
-  let msg' = Rtsp.msgSetHeaders msg [("Server","HMO server/0.0.1")]
+  let msg' = Rtsp.msgSetHeaders msg [("Server", (svrVersion . svrInfo) state )]
   putItemToSend (MsgItem msg' body) state
 
 badRequest :: Rtsp.Message    
@@ -152,17 +164,39 @@ clearQueue state = state {sendQueue = []}
 --
 handleAnnounce :: Rtsp.Message -> Maybe B.ByteString -> ConnInfo -> IO (Rtsp.Message, ConnInfo)
 handleAnnounce rq@(Rtsp.Request cseq _ _ _ _) body state = do
-  userInfo <- runMaybeT $ authenticate rq (scripts state)
+  userInfo <- runMaybeT $ authenticate rq state
   case userInfo of
     Nothing -> authRequired rq state 
     _ -> notImplemented cseq state
 
-authRequired (Rtsp.Request cseq _ _ _ _) state = 
-  return $ (Rtsp.Response cseq Rtsp.AuthorizationRequired Headers.empty, state)
+-- | Generates an RTSP "authorization required" response, updating the
+--   connection state with a new authentication context if need be.
+--
+authRequired :: Rtsp.Message -> ConnInfo -> IO (Rtsp.Message, ConnInfo)
+authRequired (Rtsp.Request cseq _ _ _ _) state = do
+    (state', authCtx) <- getAuthContext state
+    let (authCtx', hs) = genAuthHeaders authCtx
+    let hdrs = foldl' setHeader Headers.empty hs  
+    return $ (Rtsp.Response cseq Rtsp.AuthorizationRequired hdrs, state' {connAuthCtx=authCtx })
+  where 
+    setHeader :: Headers.Headers -> String -> Headers.Headers
+    setHeader hs s = Headers.set "WWW-Authenticate" s hs
+      
+    getAuthContext :: ConnInfo -> IO (ConnInfo, AuthContext)
+    getAuthContext s = let ctx = connAuthCtx s
+                       in do isStale <- contextIsStale ctx
+                             if not isStale then return (s, ctx)
+                                            else do ctx' <- refreshAuthContext ctx
+                                                    return (s {connAuthCtx = ctx'}, ctx')
 
+-- | Lifts a "simple" maybe into a transformed MaybeT monad 
+--
 liftMaybe :: Monad m => Maybe a -> MaybeT m a 
 liftMaybe = MaybeT . return
 
+-- | Runs script action and translates the result into something that the
+--   connection can understand.
+--
 runScript :: ScriptResultIO (Maybe a) -> MaybeT IO a
 runScript action = do
   rval <- (lift . runErrorT) action
@@ -170,14 +204,22 @@ runScript action = do
     Right x -> liftMaybe x
     Left e -> throw e
 
-authenticate :: Rtsp.Message -> ScriptExecutor -> MaybeT IO UserId
-authenticate (Rtsp.Request _ verb uri _ hs) scripts = do
-  authInfo <- liftMaybe $ Headers.get "Authorisation" hs >>= parseAuthHeader
-  userInfo <- runScript $ queryUser scripts (authUser authInfo)
-  case checkCreds "/" "ANNOUNCE" authInfo userInfo of
-    True -> return $ fromUserInfo userInfo
-    False -> fail ""
-  
+-- | Authentcates a user - i.e. checks that the user exists and that their
+--   credentials match.
+--
+authenticate :: Rtsp.Message -> ConnInfo -> MaybeT IO UserId
+authenticate (Rtsp.Request _ verb uri _ hs) state = do
+  let realm = (svrRealm . svrInfo) state
+  let scripts = (svrScripts . svrInfo) state
+  let context  = connAuthCtx state
+  isStale <- (lift . contextIsStale) context
+  if isStale then fail ""
+             else do response <- liftMaybe $ Headers.get "Authorisation" hs >>= parseAuthHeader
+                     userInfo <- runScript $ queryUser scripts (authUser response)
+                     case checkCreds realm verb response userInfo of
+                       True -> return $ fromUserInfo userInfo
+                       False -> fail ""
+-- | 
 internalServerError :: Int -> Rtsp.Message
 internalServerError sq = Rtsp.Response sq Rtsp.InternalServerError Headers.empty
  
@@ -185,7 +227,8 @@ internalServerError sq = Rtsp.Response sq Rtsp.InternalServerError Headers.empty
 --   on something to send, this function will wake it up and pass the supplied 
 --   item directly to it, bypassing the queue.
 -- 
---   This should only ever be called on the connection thread
+--   This should only ever be called on the connection thread.
+--
 putItemToSend :: ItemToSend -> ConnInfo -> IO ConnInfo
 putItemToSend item state = do 
   case writerReplyVar state of 
