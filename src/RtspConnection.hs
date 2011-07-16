@@ -143,7 +143,6 @@ badRequest = Rtsp.Response 0 Rtsp.BadRequest Headers.empty
 
 notImplemented :: Int -> ConnInfo -> IO (Rtsp.Message, ConnInfo) 
 notImplemented cseq state = return $ (Rtsp.Response cseq Rtsp.NotImplemented Headers.empty, state)
-
   
 processBadRequest :: ConnInfo -> IO ConnInfo
 processBadRequest state = do
@@ -163,11 +162,27 @@ clearQueue state = state {sendQueue = []}
 -- | Handles an announcement request from an RTSP client.
 --
 handleAnnounce :: Rtsp.Message -> Maybe B.ByteString -> ConnInfo -> IO (Rtsp.Message, ConnInfo)
-handleAnnounce rq@(Rtsp.Request cseq _ _ _ _) body state = do
+handleAnnounce rq@(Rtsp.Request cseq _ _ _ _) body state = 
+  withAuthenticatedUserDo rq state $ \userInfo -> notImplemented cseq state
+
+type AuthenticatedAction = UserId -> IO (Rtsp.Message, ConnInfo)
+
+-- | Handles the authentication of a request. If the user's authentication
+--   checks out the fuction will apply the authenticated user to the supplied 
+--   action. If the user doesn't check out the function will generate a 
+--   request for authentication and return it to the client.
+withAuthenticatedUserDo :: 
+  Rtsp.Message ->             -- ^ The RTSP request to authenticate
+  ConnInfo ->                 -- ^ The current state of the connection
+  AuthenticatedAction ->      -- ^ The action to run iff the user checks out
+  IO (Rtsp.Message, ConnInfo) -- ^ Returns an RTSP response to send to the client 
+                              --   and an updated connection state record.
+withAuthenticatedUserDo rq state action = do
   userInfo <- runErrorT $ authenticate rq state
   debugLog $ "Authentication returned: " ++ (show userInfo)
   case userInfo of
-    Right uid -> notImplemented cseq state 
+    Right uid -> action uid
+    Left Stale -> authRequired rq state
     Left MissingAuthorisation -> authRequired rq state
     Left BadCredentials -> authRequired rq state
     Left MalformedAuthRequest -> return (badRequest, state) 

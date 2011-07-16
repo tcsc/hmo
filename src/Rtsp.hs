@@ -68,7 +68,8 @@ data Message = Request Int String URI Version Headers.Headers
 data Packet = Packet Int B.ByteString deriving (Show)
   
 instance Show Message where 
-  show (Request s v u _ hs) = "#" ++ (show s) ++ " " ++ (show v) ++ " " ++ (show u) ++ "\n" 
+  show (Request s v u _ hs) = "#" ++ (show s) ++ " " ++ (show v) ++ " " ++ (show u) 
+                                -- ++ "\n" 
                                 -- ++ (intercalate "\n" $ Headers.map (\(n,v) -> n ++ ": " ++ v) hs) 
   show (Response _ s _) = (show s) 
 
