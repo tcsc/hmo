@@ -1,4 +1,4 @@
-UNAME := $(shell uname -o)
+UNAME := $(shell uname)
 SRC = src
 OBJ = obj
 HC = ghc
@@ -28,7 +28,7 @@ default : $(OUT)
 	@:
 
 $(OUT): $(OBJS) $(BIN)
-	$(HC) --make $(OPTS) -o $(OUT) $(PKGS) $(OBJS)
+	$(HC)  --make $(OPTS) -o $(OUT) $(PKGS) $(OBJS)
 
 obj/%.hi : obj/%.o
 	@:
