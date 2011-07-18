@@ -1,10 +1,11 @@
 {-# LANGUAGE DeriveDataTypeable, ScopedTypeVariables #-}
 
-module RtspConnection(
-  ServerInfo (..),
+module RtspService(
+  RtspService,
   RtspConnection,
-  RtspConnection.new,
-  RtspConnection.unitTests
+  newRtspService,
+  handleConnection,
+  RtspService.unitTests
 ) where 
   
 import Prelude hiding (catch)
@@ -20,9 +21,11 @@ import qualified Data.ByteString.UTF8 as Utf8
 import qualified Data.Map as Map
 import Data.List
 import Data.Maybe
-import Data.Typeable
+import Data.Time.Clock.POSIX
+import Data.Word
 import Network.Socket hiding (send, sendTo, recv, recvFrom)
 import Network.Socket.ByteString
+import System.Random.Mersenne.Pure64
 import Test.HUnit(Test(..), assertBool, assertEqual)
 
 import Authentication
@@ -32,6 +35,98 @@ import qualified Headers as Headers
 import qualified Logger as Log
 import ScriptExecutor
 import Service
+
+-- ----------------------------------------------------------------------------
+-- RTSP Service Immplementation
+-- ----------------------------------------------------------------------------
+
+-- | "mutable" service state
+data ServiceState = SvcState {
+  svcRng :: !PureMT,
+  svcSessions :: !SessionMap
+}
+
+type SessionId = Word64
+
+data RtspSession = Session {
+  sessionId       :: !SessionId,
+  snLastActivitiy :: !POSIXTime
+}
+
+type SessionVar = TVar RtspSession
+
+type SessionMap = Map.Map SessionId SessionVar
+
+type StateVar = TVar ServiceState
+
+type Realm = String
+
+type ServerVersion = String
+
+-- | A type alias that better reflects the use of the ScriptExecutor within the
+--   context of the RTSP service. 
+type Db = ScriptExecutor 
+
+-- | A handle to an RTSP service. 
+data RtspService = Svc Realm ServerVersion StateVar Db
+
+-- | Initialises the RTSP service 
+newRtspService :: 
+  Realm ->         -- ^ The realm that the server will report when authenticating a client 
+  ServerVersion -> -- ^ The version string that the server will return on all responses
+  Db ->            -- ^ The user and account database to be used for authentication
+  IO RtspService
+newRtspService realm version db = 
+  let sessions = Map.empty
+  in do { rng <- newPureMT;
+          svcVar <- newTVarIO $ SvcState rng sessions;
+          return $ Svc realm version svcVar db; }
+
+-- | Registers a new connection with the server and spawns the threads that
+--   will drive it. 
+handleConnection :: 
+  RtspService ->    -- ^ The RTSP Service that will "own" the new connection
+  Int ->            -- ^ The amount of data the connectiuon will be allowed to buffer
+  Socket ->         -- ^ The network socket representing the communications channel
+  IO RtspConnection
+handleConnection svc maxData s = newConnection svc s maxData
+  
+newSession :: RtspService -> POSIXTime -> STM RtspSession
+newSession (Svc _ _ stateVar _) now = do 
+  state <- readTVar stateVar
+  let (sid, rng') = randomWord64 $ svcRng state
+  let sn = Session sid now
+  snVar <- newTVar sn
+  let svcSessions' = Map.insert sid snVar $ svcSessions state
+  writeTVar stateVar $! state {svcRng = rng', svcSessions = svcSessions'}
+  return sn
+  
+getSession :: RtspService -> SessionId -> STM (Maybe RtspSession)
+getSession (Svc _ _ stateVar _) sid = do
+  snVar <- readTVar stateVar >>= \state -> return $ Map.lookup sid $ svcSessions state
+  case snVar of 
+    Nothing -> return Nothing
+    Just v -> readTVar v >>= \sn -> return $ Just sn 
+
+genSessionId :: RtspService -> STM SessionId
+genSessionId (Svc _ _ stateVar _) = do
+  state <- readTVar stateVar
+  let (sid, rng') = randomWord64 $ svcRng state
+  writeTVar stateVar $! state {svcRng = rng'}
+  return sid
+
+serviceRealm :: RtspService -> Realm
+serviceRealm (Svc r _ _ _) = r
+
+serviceVersion :: RtspService -> ServerVersion
+serviceVersion (Svc _ v _ _) = v
+
+serviceDatabase :: RtspService -> Db
+serviceDatabase (Svc _ _ _ db) = db
+
+-- ----------------------------------------------------------------------------
+-- RTSP Connection Implementation
+-- ----------------------------------------------------------------------------
 
 data ConnReply = NoReply
                | OK
@@ -57,20 +152,12 @@ data ConnMsg = Hello ReplyVar
 data ConnState = ConnAlive
                | ShuttingDown
                deriving (Show, Eq)
-  
--- | Global service information that is applicable to (and shared by) all
---   connections
-data ServerInfo =  SvcInf {
-  svrRealm   :: !String,
-  svrVersion :: !String,
-  svrScripts :: !ScriptExecutor
-}
 
 -- | Defines a state block for the connection.
 data ConnInfo = State {
   connSocket      :: !Socket,
   connState       :: !ConnState,
-  svrInfo         :: !ServerInfo,
+  connService     :: !RtspService,
   readerThread    :: !ThreadId,
   writerThread    :: !ThreadId,
   writerReplyVar  :: !(Maybe (TMVar ItemToSend)),
@@ -90,20 +177,21 @@ instance Error Rtsp.Status where
   noMsg    = Rtsp.InternalServerError
   strMsg _ = Rtsp.InternalServerError
   
--- | Spawns a new connection manager thread and returns a RtspConnection that 
---   can used to address the connection
-new :: Socket -> ServerInfo -> Int -> IO RtspConnection
-new s svrInfo maxData = do
-    svc <- newService (newState s svrInfo maxData) (handleCall) (closeState)
+-- | Spawns a new connection manager thread and returns an RtspConnection handle 
+--   that can used to address the connection
+newConnection :: RtspService -> Socket -> Int -> IO RtspConnection
+newConnection rtsp s maxData = do
+    svc <- newService (newState) (handleCall) (closeState)
     return $ MkConn svc
   where
-    newState :: Socket -> ServerInfo -> Int -> RtspSvc -> IO ConnInfo
-    newState sk svr cutoff svc = do
-      debugLog "Entering new connection thread"
-      readerTid <- forkIO $ reader sk cutoff svc
-      writerTid <- forkIO $ writer sk svc
-      authCtx <- newAuthContext (svrRealm svrInfo) 30
-      return $ State sk ConnAlive svr readerTid writerTid Nothing [] Map.empty authCtx
+    newState :: RtspSvc -> IO ConnInfo
+    newState svc = 
+      let realm = serviceRealm rtsp 
+      in do debugLog "Entering new connection thread"
+            readerTid <- forkIO $ reader s maxData svc
+            writerTid <- forkIO $ writer s svc
+            authCtx <- newAuthContext realm 30
+            return $ State s ConnAlive rtsp readerTid writerTid Nothing [] Map.empty authCtx
       
     closeState :: ConnInfo -> IO ()
     closeState state = do 
@@ -134,9 +222,10 @@ processMessage rq@(Rtsp.Request sq verb uri version headers) body state = do
     sendResponse r Nothing state'
    
 sendResponse :: Rtsp.Message -> Maybe B.ByteString -> ConnInfo -> IO ConnInfo
-sendResponse msg body state = do
-  let msg' = Rtsp.msgSetHeaders msg [("Server", (svrVersion . svrInfo) state )]
-  putItemToSend (MsgItem msg' body) state
+sendResponse msg body state = 
+  let version = (serviceVersion . connService) state
+      msg' = Rtsp.msgSetHeaders msg [("Server", version)]
+  in putItemToSend (MsgItem msg' body) state
 
 badRequest :: Rtsp.Message    
 badRequest = Rtsp.Response 0 Rtsp.BadRequest Headers.empty
@@ -227,12 +316,13 @@ runScript action = do
 --   credentials match.
 --
 authenticate :: Rtsp.Message -> ConnInfo -> AuthResultIO UserId
-authenticate (Rtsp.Request _ verb uri _ hs) state = do
-    let realm = (svrRealm . svrInfo) state
-    let scripts = (svrScripts . svrInfo) state
-    let context  = connAuthCtx state
+authenticate (Rtsp.Request _ verb uri _ hs) state = 
+  let realm = (serviceRealm . connService) state
+      db = (serviceDatabase . connService) state
+      context  = connAuthCtx state
+  in do
     response <- getResponse
-    userInfo <- lift . runMaybeT $ runScript $ queryUser scripts (authUser response)
+    userInfo <- lift . runMaybeT $ runScript $ queryUser db (authUser response)
     case userInfo of 
       Nothing -> throwError NoSuchUser
       Just user -> do result <- ErrorT . return $ checkCreds verb response user context

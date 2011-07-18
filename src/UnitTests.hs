@@ -7,7 +7,7 @@ import Headers
 import LuaUtils
 import Multimap
 import Rtsp
-import RtspConnection
+import RtspService
 import Sdp
 import SessionManager
 
@@ -17,6 +17,6 @@ allTests = TestList [
   LuaUtils.unitTests,
   Multimap.unitTests,
   Rtsp.unitTests, 
-  RtspConnection.unitTests,
+  RtspService.unitTests,
   SessionManager.unitTests,
   Sdp.unitTests]
