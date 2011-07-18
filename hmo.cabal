@@ -21,6 +21,6 @@ Executable hmo
                   unix, utf8-string
   Other-modules:  Authentication, CaseInsensitiveString, Config, Flags, 
                   Headers, Logger, LuaUtils, Multimap, Parsec, Rtsp,
-                  RtspConnection, ScriptExecutor, ScriptTypes, Sdp, Service, 
+                  RtspService, ScriptExecutor, ScriptTypes, Sdp, Service, 
                   Session, SessionDatabase, SessionManager, Signals,
                   TcpListener, ThreadManager, UnitTests, WorkerPool, WorkerTypes

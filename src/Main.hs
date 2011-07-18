@@ -29,7 +29,7 @@ import System.Log.Handler.Simple
 import Config
 import ScriptExecutor
 import TcpListener
-import RtspConnection
+import RtspService
 import SessionManager
 import Signals
 import qualified Logger as Log
@@ -59,11 +59,12 @@ main = withSocketsDo $ do
         infoLog "Starting Session Manager"
         sessionManager <- newSessionManager scripting
 
-        let rtspInfo = serverInfo scripting config 
+        infoLog "Creating RTSP Service"
+        rtspSvc <- createRtspService scripting config
 
-        infoLog "Creating TCP listener"        
+        infoLog "Creating TCP listeners for RTSP"        
         listener <- newListener
-        startRtsp listener rtspInfo config
+        startRtsp listener rtspSvc config
   
         infoLog "Entering main processing loop"
         mainLoop q
@@ -72,17 +73,18 @@ main = withSocketsDo $ do
         stopListener listener
         infoLog "Exiting"
   where 
-    serverInfo scripts cfg = let rtspCfg = rtspConfig cfg
-                                 realm = rtspRealm rtspCfg
-                                 svr = rtspServerString rtspCfg
-                             in SvcInf realm svr scripts
+    createRtspService :: ScriptExecutor -> Config -> IO RtspService
+    createRtspService scripts cfg = let rtspCfg = rtspConfig cfg
+                                        realm = rtspRealm rtspCfg
+                                        svr = rtspServerString rtspCfg
+                                    in newRtspService realm svr scripts
 
-    startRtsp :: TcpListener -> ServerInfo -> Config -> IO ()
-    startRtsp listener info cfg = do
+    startRtsp :: TcpListener -> RtspService -> Config -> IO ()
+    startRtsp listener service cfg = do
       infoLog "Starting RTSP listeners"
       let rtspCfg = rtspConfig cfg 
       let cutoff = rtspCutoff rtspCfg
-      foldM_ (\_ port -> bindRtsp listener port (onRtspConnection info cutoff) ) 
+      foldM_ (\_ port -> bindRtsp listener port (onRtspConnection service cutoff) ) 
              ()
              (rtspPorts rtspCfg)
     
@@ -92,10 +94,9 @@ main = withSocketsDo $ do
       case msg of 
         Interrupt -> return () 
         
-    onRtspConnection :: ServerInfo -> Int -> Socket -> IO ()
-    onRtspConnection info cutoff s = do 
-      RtspConnection.new s info cutoff
-      return () 
+    onRtspConnection :: RtspService -> Int -> Socket -> IO ()
+    onRtspConnection rtsp cutoff s = handleConnection rtsp cutoff s >> return ()
+      
       
 logError :: ScriptError -> IO ()
 logError err = do

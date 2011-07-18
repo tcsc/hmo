@@ -8,8 +8,8 @@ OPTS = -threaded
 SRCS = $(wildcard $(SRC)/*.hs)
 SBOOT = $(wildcard $(SRC)/*.hs-boot)
 PACKAGES = base base64-string bimap binary binary-strict bytestring containers   \
-           ghc-binary haskell98 hex hslogger hslua HUnit MaybeT MissingH mtl     \
-           network parsec pureMD5 stm stringsearch utf8-string
+           ghc-binary haskell98 hex hslogger hslua HUnit MaybeT mersenne-random-pure64 \
+           MissingH mtl network parsec pureMD5 stm stringsearch utf8-string
 
 # platform-specific changes
 ifeq ($(UNAME), MinGW)
@@ -110,26 +110,26 @@ obj/SessionManager.o : obj/CommonTypes.hi
 obj/Authentication.o : src/Authentication.hs
 obj/Authentication.o : obj/Parsec.hi
 obj/Authentication.o : obj/CommonTypes.hi
-obj/RtspConnection.o : src/RtspConnection.hs
-obj/RtspConnection.o : obj/Service.hi
-obj/RtspConnection.o : obj/ScriptExecutor.hi
-obj/RtspConnection.o : obj/Logger.hi
-obj/RtspConnection.o : obj/Headers.hi
-obj/RtspConnection.o : obj/Rtsp.hi
-obj/RtspConnection.o : obj/CommonTypes.hi
-obj/RtspConnection.o : obj/Authentication.hi
+obj/RtspService.o : src/RtspService.hs
+obj/RtspService.o : obj/Service.hi
+obj/RtspService.o : obj/ScriptExecutor.hi
+obj/RtspService.o : obj/Logger.hi
+obj/RtspService.o : obj/Headers.hi
+obj/RtspService.o : obj/Rtsp.hi
+obj/RtspService.o : obj/CommonTypes.hi
+obj/RtspService.o : obj/Authentication.hi
 obj/Main.o : src/Main.hs
 obj/Main.o : obj/Logger.hi
 obj/Main.o : obj/Signals.hi
 obj/Main.o : obj/SessionManager.hi
-obj/Main.o : obj/RtspConnection.hi
+obj/Main.o : obj/RtspService.hi
 obj/Main.o : obj/TcpListener.hi
 obj/Main.o : obj/ScriptExecutor.hi
 obj/Main.o : obj/Config.hi
 obj/UnitTests.o : src/UnitTests.hs
 obj/UnitTests.o : obj/SessionManager.hi
 obj/UnitTests.o : obj/Sdp.hi
-obj/UnitTests.o : obj/RtspConnection.hi
+obj/UnitTests.o : obj/RtspService.hi
 obj/UnitTests.o : obj/Rtsp.hi
 obj/UnitTests.o : obj/Multimap.hi
 obj/UnitTests.o : obj/LuaUtils.hi
