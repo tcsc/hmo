@@ -221,7 +221,7 @@ getAuthContext rtsp@(Svc _ _ stateVar _) connId =
                           Nothing -> let ctx = newAuthContext now realm 30
                                          contexts' = Map.insert connId ctx contexts
                                          state' = contexts' `seq` state {svcAuthContexts = contexts'}
-                                      in do writeTVar stateVar $! state
+                                      in do writeTVar stateVar $! state'
                                             return ctx
                                             
 badRequest :: (Rtsp.Message, Rtsp.MessageBody) 

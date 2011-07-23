@@ -288,7 +288,7 @@ hdrContentLength = "Content-Length"
 statusDescriptions = Map.fromList $ map (\(s,t) -> (s, Utf8.fromString t)) [ 
                         (OK,                    "OK"),
                         (BadRequest,            "BadRequest"),
-                        (AuthorizationRequired, "Authoraization Required"),
+                        (AuthorizationRequired, "Authorization Required"),
                         (NotFound,              "Not Found"),
                         (SessionNotFound,       "Session Not Found"),
                         (InternalServerError,   "Internal Server Error"), 
