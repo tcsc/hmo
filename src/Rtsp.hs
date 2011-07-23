@@ -2,6 +2,8 @@
 
 module Rtsp (
   Message (..),
+  MessageBody,
+  SequenceNumber,
   Packet (..),
   Status (..),
   Verb (..),
@@ -11,9 +13,13 @@ module Rtsp (
   parseMessage,
   formatMessage,
   formatPacket,
+  hdrSession,
+  hdrAuthenticate,
   msgSequence,
   msgHeaders,
+  msgGetHeaderValue,
   msgSetHeaders,
+  msgSequenceNumber,
   msgContentLength,
   Rtsp.unitTests
 ) where
@@ -43,6 +49,7 @@ data Status = OK
             | BadRequest
             | AuthorizationRequired
             | NotFound
+            | SessionNotFound
             | InternalServerError
             | NotImplemented
             | BadGateway
@@ -60,10 +67,14 @@ instance Enum Status where
 data Verb = Describe | Announce | Setup | Play | Teardown | OtherVerb String
   deriving (Eq, Show)
 
+type Method = String
+type SequenceNumber = Int
 type Version = (Int, Int)
 
-data Message = Request Int String URI Version Headers.Headers
-             | Response Int Status Headers.Headers
+data Message = Request SequenceNumber Method   URI Version Headers.Headers
+             | Response SequenceNumber Status Headers.Headers
+
+type MessageBody = Maybe B.ByteString
              
 data Packet = Packet Int B.ByteString deriving (Show)
   
@@ -82,10 +93,17 @@ msgHeaders :: Message -> Headers.Headers
 msgHeaders (Request _ _ _ _ hs) = hs 
 msgHeaders (Response _ _ hs) = hs 
 
+msgGetHeaderValue :: Message -> String -> Maybe String
+msgGetHeaderValue msg n = Headers.get n $ msgHeaders msg
+
 msgSetHeaders :: Message -> [(String, String)] -> Message
 msgSetHeaders (Response cseq stat hs) values = 
   let hs' = foldl' (\h (n, v) -> Headers.set n v h) hs values
   in Response cseq stat hs'
+
+msgSequenceNumber :: Message -> SequenceNumber
+msgSequenceNumber (Request cseq _ _ _ _) = cseq
+msgSequenceNumber (Response cseq _ _) = cseq
 
 msgContentLength :: Message -> Int
 msgContentLength (Request _ _ _ _ hs) = maybe 0 fromIntegral (contentLength hs)
@@ -101,6 +119,12 @@ parseMessage :: B.ByteString -> Maybe Message
 parseMessage bytes = case parse message "" bytes of
                        Left _ -> Nothing
                        Right msg -> Just msg
+
+hdrSession :: String
+hdrSession = "Session"
+
+hdrAuthenticate :: String
+hdrAuthenticate = "WWW-Authenticate"
 
 -- ----------------------------------------------------------------------------
 --  RTSP parser
@@ -266,6 +290,7 @@ statusDescriptions = Map.fromList $ map (\(s,t) -> (s, Utf8.fromString t)) [
                         (BadRequest,            "BadRequest"),
                         (AuthorizationRequired, "Authoraization Required"),
                         (NotFound,              "Not Found"),
+                        (SessionNotFound,       "Session Not Found"),
                         (InternalServerError,   "Internal Server Error"), 
                         (NotImplemented,        "Not Implemented"),
                         (BadGateway,            "Bad Gateway"),
@@ -278,6 +303,7 @@ statusMap = Bimap.fromList [ (200, OK),
                              (400, BadRequest),
                              (401, AuthorizationRequired),
                              (404, NotFound),
+                             (454, SessionNotFound),
                              (500, InternalServerError), 
                              (501, NotImplemented),
                              (502, BadGateway),
@@ -342,17 +368,18 @@ testVerbs = TestList [
   "Other"          ~: OtherVerb "narf" ~=? testParseVerb "narf"]
 
 testStatusToEnum = TestList [
-  "OK"              ~: OK                  ~=? Rtsp.toStatus 200,
-  "Bad Request"     ~: BadRequest          ~=? Rtsp.toStatus 400,
-  "Not Found"       ~: NotFound            ~=? Rtsp.toStatus 404,
-  "Error"           ~: InternalServerError ~=? Rtsp.toStatus 500,
-  "Not Implemented" ~: NotImplemented      ~=? Rtsp.toStatus 501,
-  "Bad Gateway"     ~: BadGateway          ~=? Rtsp.toStatus 502,
-  "Unavailable"     ~: ServiceUnavailable  ~=? Rtsp.toStatus 503,
-  "Gateway Timeout" ~: GatewayTimeout      ~=? Rtsp.toStatus 504,
-  "Unsupported Ver" ~: VersionNotSupported ~=? Rtsp.toStatus 505,
-  "Unsupported Opt" ~: OptionNotSupported  ~=? Rtsp.toStatus 551,
-  "Unknown"         ~: Unknown 0           ~=? Rtsp.toStatus 0]
+  "OK"                ~: OK                  ~=? Rtsp.toStatus 200,
+  "Bad Request"       ~: BadRequest          ~=? Rtsp.toStatus 400,
+  "Not Found"         ~: NotFound            ~=? Rtsp.toStatus 404, 
+  "Session Not Found" ~: SessionNotFound     ~=? Rtsp.toStatus 454, 
+  "Error"             ~: InternalServerError ~=? Rtsp.toStatus 500,
+  "Not Implemented"   ~: NotImplemented      ~=? Rtsp.toStatus 501,
+  "Bad Gateway"       ~: BadGateway          ~=? Rtsp.toStatus 502,
+  "Unavailable"       ~: ServiceUnavailable  ~=? Rtsp.toStatus 503,
+  "Gateway Timeout"   ~: GatewayTimeout      ~=? Rtsp.toStatus 504,
+  "Unsupported Ver"   ~: VersionNotSupported ~=? Rtsp.toStatus 505,
+  "Unsupported Opt"   ~: OptionNotSupported  ~=? Rtsp.toStatus 551,
+  "Unknown"           ~: Unknown 0           ~=? Rtsp.toStatus 0]
 
 unitTests = TestList [TestLabel "Parse Minimal Request" testParseMinimalRequest,
                       TestLabel "Format Minimal Response" testFormatMinimalResponse,

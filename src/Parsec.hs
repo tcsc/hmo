@@ -45,8 +45,7 @@ isImplicit p s = do
   p
   setPosition pos
   return s
-
-
+  
 maybeInt s = case (reads s :: [(Integer, String)]) of
                [] -> Nothing
                [(n, _)] -> Just n
