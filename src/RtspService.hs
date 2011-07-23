@@ -128,8 +128,9 @@ handleAnnounce rtsp conn (rq, body) =
       cseq = Rtsp.msgSequenceNumber rq
       sd = maybe Nothing Sdp.parse body
   in do
-    if contentType /= "application-sdp" || sd == Nothing 
-      then return $ emptyResponse Rtsp.BadRequest cseq
+    if contentType /= "application/sdp" || sd == Nothing 
+      then do debugLog $ "unsupported session description format " ++ contentType ++ " or malformed description" 
+              return $ emptyResponse Rtsp.BadRequest cseq
       else withAuthenticatedUserDo rtsp conn rq $ \_ -> return (notImplemented cseq)
     
 type AuthenticatedAction = UserId -> IO (Rtsp.Message, Rtsp.MessageBody)

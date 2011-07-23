@@ -192,7 +192,7 @@ genDigestHeader ctx reason =
       nonce = ctxNonce ctx
       rng = ctxRng ctx
       opaque = ctxOpaque ctx
-      stale = if reason == Stale then "stale=TRUE," else ""
+      stale = if reason == Stale then "stale=TRUE, " else ""
   in "Digest " ++
      "realm=\"" ++ realm ++ "\", " ++
      "nonce=\"" ++ nonce ++ "\", " ++
