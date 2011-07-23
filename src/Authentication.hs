@@ -11,6 +11,7 @@ module Authentication (
   authUser,
   newAuthContext,
   refreshAuthContext,
+  refreshAuthContextIO,
   contextIsStale,
   genAuthHeaders,
 ) where
@@ -20,14 +21,16 @@ import Control.Monad.Error
 import qualified Data.ByteString.Lazy.Char8 as LB8
 import Data.Char
 import Data.Digest.Pure.MD5
-import qualified Data.Hex as Hex
 import Data.Char
+import Data.Hex
 import Data.Maybe
 import Data.List
 import Data.List.Utils
 import Data.Time.Clock
 import Data.Time.Clock.POSIX
-import System.Random
+import Data.Word
+import Numeric
+import System.Random.Mersenne.Pure64
 import Test.HUnit
 import Text.Parsec
 import Text.Parsec.Char
@@ -35,7 +38,8 @@ import Text.Printf
 
 import CommonTypes
 import Parsec
-
+import qualified Hex as Hex
+ 
 data AuthInfo = Basic String String
               | Digest [DigestElement]
               deriving (Show, Eq)
@@ -71,9 +75,10 @@ data AuthFailure = UnsupportedMechanism
 data AuthContext = AuthContext {
   ctxRealm    :: !String,
   ctxNonce    :: !String,
+  ctxOpaque   :: !String,
   ctxExpiry   :: POSIXTime,
   ctxLifespan :: !Int,
-  ctxRng      :: !StdGen
+  ctxRng      :: !PureMT
 }
 
 instance Error AuthFailure where
@@ -82,30 +87,35 @@ instance Error AuthFailure where
 type AuthResult = Either AuthFailure
 type AuthResultIO = ErrorT AuthFailure IO
 
-newAuthContext :: String -> Int -> IO AuthContext
-newAuthContext realm lifeSpan = do 
-  now <- getPOSIXTime 
-  let rng = mkStdGen $ (truncate . (* 1000) . toRational) now
-  refreshAuthContext $ AuthContext realm "" 0 lifeSpan rng
+newAuthContext :: POSIXTime -> String -> Int -> AuthContext
+newAuthContext now realm lifeSpan = 
+  let rng = pureMT $ (truncate . (* 1000) . toRational) now
+      (rng', opaque) = randomString rng 32
+  in refreshAuthContext now $ AuthContext realm "" opaque 0 lifeSpan rng'
 
-contextIsStale :: AuthContext -> IO Bool
-contextIsStale ctx = do now <- getPOSIXTime
-                        return $ now > (ctxExpiry ctx)
+newAuthContextIO :: String -> Int -> IO AuthContext
+newAuthContextIO realm lifeSpan = getPOSIXTime >>= \now -> return $ newAuthContext now realm lifeSpan
 
-refreshAuthContext :: AuthContext -> IO AuthContext
-refreshAuthContext context = do 
-    now <- getPOSIXTime
-    return $ refreshCtx now context 
-  where
-    refreshCtx now ctx = let rng = (ctxRng ctx)
-                             lifespan = (ctxLifespan ctx)
-                             (rng',nonce) = randomString rng 32
-                             expiry = (now + fromIntegral lifespan)
-                          in ctx { ctxNonce = nonce, ctxExpiry = expiry, ctxRng = rng' }
+refreshAuthContext :: POSIXTime -> AuthContext -> AuthContext
+refreshAuthContext now ctx = let rng = (ctxRng ctx)
+                                 lifespan = (ctxLifespan ctx)
+                                 (rng',nonce) = randomString rng 32
+                                 expiry = (now + fromIntegral lifespan)
+                             in ctx { ctxNonce = nonce, ctxExpiry = expiry, ctxRng = rng' }
+                      
+contextIsStaleIO :: AuthContext -> IO Bool
+contextIsStaleIO ctx = do now <- getPOSIXTime
+                          return $ contextIsStale ctx now
 
-genAuthHeaders :: AuthContext -> (AuthContext, [String])
-genAuthHeaders ctx = let (ctx', digest) = genDigestHeader ctx
-                     in (ctx', [digest])
+contextIsStale :: AuthContext -> POSIXTime -> Bool
+contextIsStale ctx now = now > (ctxExpiry ctx)
+
+refreshAuthContextIO :: AuthContext -> IO AuthContext
+refreshAuthContextIO context = getPOSIXTime >>= \now -> return $ refreshAuthContext now context 
+
+genAuthHeaders :: AuthContext -> AuthFailure -> [String]
+genAuthHeaders ctx reason = let digest = genDigestHeader ctx reason
+                            in [digest]
                                            
 parseAuthHeader :: String -> Maybe AuthInfo
 parseAuthHeader s = 
@@ -163,28 +173,32 @@ parseBasic p =
 
 -- | generates an 'n' character long random string for use with the
 --   authentication
-randomString gen n = foldl' rchar (gen,[]) [0..(n-1)] 
-  where rchar :: RandomGen g => (g,[Char]) -> a -> (g,[Char]) 
-        rchar (g,cs) _ = let (c, g') = randomR ('a','z') g 
-                         in (g', c : cs)
-
+randomString :: PureMT -> Int -> (PureMT, String) 
+randomString rng n = (rng', str)
+  where str = concatMap Hex.hex ws
+        (rng',ws) = foldl' randomWord8 (rng,[]) [0..(n-1)]
+        
+        randomWord8 :: (PureMT,[Word8]) -> t -> (PureMT, [Word8])
+        randomWord8 (g,cs) _ = (g', w8 : cs) where (w, g') = randomWord g 
+                                                   w8 = fromIntegral w
+                
 -- ----------------------------------------------------------------------------
 -- Digest authentication
 -- ----------------------------------------------------------------------------
 
-genDigestHeader :: AuthContext -> (AuthContext, String)
-genDigestHeader ctx = 
+genDigestHeader :: AuthContext -> AuthFailure -> String
+genDigestHeader ctx reason = 
   let realm = ctxRealm ctx
       nonce = ctxNonce ctx
       rng = ctxRng ctx
-      (rng',opaque) = randomString rng 64
-      header = "Digest " ++
-                "realm=\"" ++ realm ++ "\", " ++
-                "nonce=\"" ++ nonce ++ "\", " ++
-                "opaque=\"" ++ opaque ++ "\", " ++ 
-                "qop=auth"
-  in (ctx {ctxRng = rng'}, header)
-                        
+      opaque = ctxOpaque ctx
+      stale = if reason == Stale then "stale=TRUE," else ""
+  in "Digest " ++
+     "realm=\"" ++ realm ++ "\", " ++
+     "nonce=\"" ++ nonce ++ "\", " ++
+     "opaque=\"" ++ opaque ++ "\", " ++ 
+     stale ++ 
+     "qop=auth"
 
 isDigestUser :: DigestElement -> Bool
 isDigestUser (DigUserName _) = True
@@ -342,7 +356,7 @@ testAuthentication = do
     assertEqual "Authentication Failed" (Right True) $ checkCreds "GET" digestTextExpected uid $! ctx
   where 
     makeContext r = do 
-      ctx <- newAuthContext r 10
+      ctx <- newAuthContextIO r 10
       return ctx { ctxNonce = "dcd98b7102dd2f0e8b11d0f600bfb0c093" } 
 
 basicTests = TestList [

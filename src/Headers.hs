@@ -3,6 +3,7 @@ module Headers(Headers,
                get,
                getHeaders,
                set,
+               setValues,
                fold,
                Headers.map,
                Headers.unitTests) 
@@ -31,6 +32,9 @@ get h hs = case getHeaders h hs of
                 
 set :: String -> String -> Headers -> Headers
 set n v (HS mmap) = HS $ MM.insert (fromString n) v mmap 
+
+setValues :: String -> [String] -> Headers -> Headers
+setValues n vs hdrs = List.foldl' (\hs v -> set n v hs) hdrs vs
   
 -- | Fetches a set of header values from a header collection
 getHeaders :: String -> Headers -> Maybe [String]

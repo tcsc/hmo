@@ -1,6 +1,10 @@
 {-# LANGUAGE FlexibleContexts, NoMonomorphismRestriction #-}
 
-module Sdp where 
+module Sdp (
+  Description,
+  Sdp.parse,
+  unitTests
+) where 
 
 import qualified Data.ByteString as B
 import qualified Data.ByteString.UTF8 as Utf8
@@ -91,9 +95,9 @@ data Description = SD {
     }
     deriving (Eq, Show)
   
-parseSdp :: B.ByteString -> Maybe Description
-parseSdp s =
-    case parse sdpLines "" s of
+parse :: B.ByteString -> Maybe Description
+parse s =
+    case Text.Parsec.parse sdpLines "" s of
       Left _   -> Nothing
       Right ls -> let name    = extractName ls
                       info    = extractInfo ls
@@ -343,7 +347,7 @@ hostName = do
   return $ HostName s 
 
 testParseLine :: String -> SdpLine
-testParseLine = fromRight . parse sdpLine ""
+testParseLine = fromRight . Text.Parsec.parse sdpLine ""
 
 -- Test parsing the basic lines as described in the SDP RFC, using the examples
 -- provided there
@@ -386,7 +390,7 @@ rfcSession = TestCase $ do
                     (Map.fromList [(99, RtpParams 99 "h263-1998" 90000 "")])
                     (Map.fromList [(99, "1234567890ABCDEF")])
                      
-  assertEqual "Session Description" expected $ fromJust (parseSdp $ Utf8.fromString text) 
+  assertEqual "Session Description" expected $ fromJust (Sdp.parse $ Utf8.fromString text) 
 {-
   let expected = [Version 0,
                   Originator "jdoe" 2890844526 2890842807 AF_INET (Addr 0x0a2f1005),
