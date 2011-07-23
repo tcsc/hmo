@@ -79,7 +79,7 @@ data AuthContext = AuthContext {
   ctxExpiry   :: POSIXTime,
   ctxLifespan :: !Int,
   ctxRng      :: !PureMT
-}
+} deriving (Show)
 
 instance Error AuthFailure where
   strMsg x = read x
@@ -90,7 +90,7 @@ type AuthResultIO = ErrorT AuthFailure IO
 newAuthContext :: POSIXTime -> String -> Int -> AuthContext
 newAuthContext now realm lifeSpan = 
   let rng = pureMT $ (truncate . (* 1000) . toRational) now
-      (rng', opaque) = randomString rng 32
+      (rng', opaque) = randomString rng 16
   in refreshAuthContext now $ AuthContext realm "" opaque 0 lifeSpan rng'
 
 newAuthContextIO :: String -> Int -> IO AuthContext
@@ -99,7 +99,7 @@ newAuthContextIO realm lifeSpan = getPOSIXTime >>= \now -> return $ newAuthConte
 refreshAuthContext :: POSIXTime -> AuthContext -> AuthContext
 refreshAuthContext now ctx = let rng = (ctxRng ctx)
                                  lifespan = (ctxLifespan ctx)
-                                 (rng',nonce) = randomString rng 32
+                                 (rng',nonce) = randomString rng 16
                                  expiry = (now + fromIntegral lifespan)
                              in ctx { ctxNonce = nonce, ctxExpiry = expiry, ctxRng = rng' }
                       
