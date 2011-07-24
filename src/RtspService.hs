@@ -140,6 +140,8 @@ handleAnnounce rtsp conn (rq, body) =
               return $ emptyResponse Rtsp.BadRequest cseq
       else withAuthenticatedUserDo rtsp conn rq $ \_ -> return (notImplemented cseq)
     
+-- | An action that will be executed if a request is properly
+--   authenticated.
 type AuthenticatedAction = UserId -> IO (Rtsp.Message, Rtsp.MessageBody)
 
 -- | Handles the authentication of a request. If the user's authentication
@@ -157,17 +159,22 @@ withAuthenticatedUserDo rtsp conn rq action =
       cseq = Rtsp.msgSequence rq
       connId = connectionId conn 
   in do
-    ctx <- getAuthContext rtsp connId
+    now <- getPOSIXTime
+    ctx <- getAuthContext rtsp connId      
     userInfo <- runErrorT $ authenticate rtsp rq ctx
     debugLog $ "Authentication returned: " ++ (show userInfo)
     case userInfo of
       Right uid -> action uid
-      Left err -> handleAuthFailure rtsp conn cseq ctx err
+      Left err -> return $ handleAuthFailure rtsp conn cseq ctx err
 
 -- | Authentcates a user - i.e. checks that the user exists and that their
 --   credentials match.
 --
-authenticate :: RtspService -> Rtsp.Message -> AuthContext -> AuthResultIO UserId
+authenticate :: 
+  RtspService ->      -- ^ The RTSP service to authenticate against
+  Rtsp.Message ->     -- ^ The RTSP request that needs to be authenticated against
+  AuthContext ->      -- ^ The current authentication context for the connection
+  AuthResultIO UserId
 authenticate rtsp (Rtsp.Request _ verb uri _ hs) ctx = 
   let realm = svcRealm rtsp
       db = svcDb rtsp
@@ -187,57 +194,55 @@ authenticate rtsp (Rtsp.Request _ verb uri _ hs) ctx =
 --   connection state with a new authentication context if need be.
 --
 handleAuthFailure :: 
-  RtspService -> 
-  RtspConnection ->
-  Rtsp.SequenceNumber -> 
-  AuthContext ->
-  AuthFailure -> IO (Rtsp.Message, Rtsp.MessageBody)
-handleAuthFailure rtsp@(Svc _ _ stateVar _) conn cseq ctx reason = do
-    ctx' <- refreshAuthContext
-    return $! authenticationRequired ctx'  
-  where  
-    refreshAuthContext = 
-      if reason /= Stale 
-        then return ctx
-        else do now <- getPOSIXTime 
-                let ctx' = Authentication.refreshAuthContext now ctx  
-                atomically $ do state <- readTVar stateVar
-                                let ctxs = svcAuthContexts state
-                                let ctxs' = Map.alter (\_ -> Just ctx') (connectionId conn) ctxs
-                                writeTVar stateVar $! state {svcAuthContexts = ctxs'} 
-                return ctx'
-  
-    authenticationRequired :: AuthContext -> (Rtsp.Message, Rtsp.MessageBody)
-    authenticationRequired authContext =
-      let authHeaders = genAuthHeaders ctx reason
-          hdrs = Headers.setValues Rtsp.hdrAuthenticate authHeaders Headers.empty
-      in (Rtsp.Response cseq Rtsp.AuthorizationRequired hdrs, Nothing)
+  RtspService ->         -- ^ A reference to the RTSP service
+  RtspConnection ->      -- ^ The RTSP connection to authenticate  
+  Rtsp.SequenceNumber -> -- ^ The sequence number of the RTSP request that failed authentication
+  AuthContext ->         -- ^ The authoriseation context of the failed authentication request
+  AuthFailure ->         -- ^ The reason that the authentication failed
+  (Rtsp.Message, Rtsp.MessageBody)
+handleAuthFailure rtsp@(Svc _ _ stateVar _) conn cseq ctx reason =
+  let authHeaders = genAuthHeaders ctx reason
+      hdrs = Headers.setValues Rtsp.hdrAuthenticate authHeaders Headers.empty
+  in (Rtsp.Response cseq Rtsp.AuthorizationRequired hdrs, Nothing)
 
 -- | Looks up an authentication context for a given connection and returns it
---   to the caller. If no authentication context is associated withe the 
+--   to the caller. If no authentication context is associated with the 
 --   connection then a new one is created, registered and then returned.
---  
+--
+--   If the auth context is stale it wil be refreshed prior to being returned
+--
 getAuthContext :: RtspService -> ConnectionId -> IO AuthContext
 getAuthContext rtsp@(Svc _ _ stateVar _) connId = 
-  let realm = svcRealm rtsp
-  in do now <- getPOSIXTime 
-        atomically $ do state <- readTVar stateVar
-                        let contexts = svcAuthContexts state 
-                        case Map.lookup connId contexts of
-                          Just ctx -> return ctx
-                          Nothing -> let ctx = newAuthContext now realm 30
-                                         contexts' = Map.insert connId ctx contexts
-                                         state' = contexts' `seq` state {svcAuthContexts = contexts'}
-                                      in do writeTVar stateVar $! state'
-                                            return ctx
-                                            
+    let realm = svcRealm rtsp
+    in do now <- getPOSIXTime 
+          atomically $ do state <- readTVar stateVar
+                          let contexts = svcAuthContexts state 
+                          case Map.lookup connId contexts of
+                            Just ctx -> refreshAuthContext connId now state ctx
+                            Nothing -> let ctx = newAuthContext now realm 30
+                                           contexts' = Map.insert connId ctx contexts
+                                           state' = contexts' `seq` state {svcAuthContexts = contexts'}
+                                        in do writeTVar stateVar $! state'
+                                              return ctx
+  where
+    -- | Refreshes the authentication context if its stale
+    refreshAuthContext :: ConnectionId -> POSIXTime -> ServiceState -> AuthContext -> STM AuthContext  
+    refreshAuthContext connId now state ctx = do
+      if not $ contextIsStale now ctx 
+        then return ctx
+        else let ctx' = Authentication.refreshAuthContext now ctx  
+                 ctxs = svcAuthContexts state
+                 ctxs' = Map.alter (\_ -> Just ctx') connId ctxs
+             in do writeTVar stateVar $! state {svcAuthContexts = ctxs'} 
+                   return ctx'
+                    
 badRequest :: (Rtsp.Message, Rtsp.MessageBody) 
 badRequest = emptyResponse Rtsp.BadRequest 0
 
--- | Generates an otherwise-empty response 
 notImplemented :: Rtsp.SequenceNumber -> (Rtsp.Message, Rtsp.MessageBody) 
 notImplemented = emptyResponse Rtsp.NotImplemented
 
+-- | Generates an empty (i.e. has no body) response with a given status value 
 emptyResponse :: Rtsp.Status -> Rtsp.SequenceNumber -> (Rtsp.Message, Rtsp.MessageBody)  
 emptyResponse status cseq = (Rtsp.Response cseq status Headers.empty, Nothing)
     
@@ -263,6 +268,7 @@ getOrNewSession (Svc _ _ stateVar _) sid = do
                       Just sVar -> readTVar sVar
                       Nothing -> newSession now state $ svcRng state
   where 
+    -- | Recursively attempts to create a new session with a unique id
     newSession :: POSIXTime -> ServiceState -> PureMT -> STM RtspSession
     newSession now state rng = 
       let sessions = svcSessions state

@@ -13,6 +13,7 @@ module Authentication (
   refreshAuthContext,
   refreshAuthContextIO,
   contextIsStale,
+  contextIsStaleIO,
   genAuthHeaders,
 ) where
   
@@ -105,10 +106,10 @@ refreshAuthContext now ctx = let rng = (ctxRng ctx)
                       
 contextIsStaleIO :: AuthContext -> IO Bool
 contextIsStaleIO ctx = do now <- getPOSIXTime
-                          return $ contextIsStale ctx now
+                          return $ contextIsStale now ctx
 
-contextIsStale :: AuthContext -> POSIXTime -> Bool
-contextIsStale ctx now = now > (ctxExpiry ctx)
+contextIsStale :: POSIXTime -> AuthContext -> Bool
+contextIsStale now ctx = now > (ctxExpiry ctx)
 
 refreshAuthContextIO :: AuthContext -> IO AuthContext
 refreshAuthContextIO context = getPOSIXTime >>= \now -> return $ refreshAuthContext now context 
