@@ -24,6 +24,7 @@ import Data.List
 import Data.Maybe
 import Data.Time.Clock.POSIX
 import Data.Word
+import Data.Int
 import Network.Socket hiding (send, sendTo, recv, recvFrom)
 import Network.Socket.ByteString
 import System.Random.Mersenne.Pure64
@@ -50,7 +51,7 @@ data ServiceState = SvcState {
   svcConnCount    :: !Int
 }
 
-type SessionId = Word64
+type SessionId = Int64
 
 type ConnectionId = Int
 
@@ -121,8 +122,14 @@ handleRequest svc conn (rq@(Rtsp.Request cseq method _ _ _), body) = do
                             _ -> return $ notImplemented cseq
               sendResponse conn response
   return () 
-  
-handleAnnounce :: RtspService -> RtspConnection -> (Rtsp.Message, Rtsp.MessageBody) -> IO (Rtsp.Message, Rtsp.MessageBody)
+
+-- | Handles an RTSP announce request by trying to create a new session at the
+--   requested path.
+handleAnnounce :: 
+  RtspService ->                      -- ^ The RTSP service
+  RtspConnection ->                   -- ^ The RTSP connection that wants to create a session
+  (Rtsp.Message, Rtsp.MessageBody) -> -- ^ The RTSP request describing the session to create
+  IO (Rtsp.Message, Rtsp.MessageBody)
 handleAnnounce rtsp conn (rq, body) = 
   let contentType = maybe "" (map toLower) $ Rtsp.msgGetHeaderValue rq "Content-Type"
       cseq = Rtsp.msgSequenceNumber rq
@@ -141,7 +148,7 @@ type AuthenticatedAction = UserId -> IO (Rtsp.Message, Rtsp.MessageBody)
 --   request for authentication and return it to the client.
 withAuthenticatedUserDo :: 
   RtspService  ->             -- ^ The current state of the RTSP server
-  RtspConnection ->
+  RtspConnection ->           -- ^ The connection that we're trying to authenticate
   Rtsp.Message ->             -- ^ The RTSP request to authenticate
   AuthenticatedAction ->      -- ^ The action to run iff the user checks out
   IO (Rtsp.Message, Rtsp.MessageBody) -- ^ Returns an RTSP response to send to the client   
@@ -236,52 +243,38 @@ emptyResponse status cseq = (Rtsp.Response cseq status Headers.empty, Nothing)
     
 getMessageSession :: RtspService -> Rtsp.Message -> IO RtspSession
 getMessageSession rtsp msg = let hdr = maybe "" id $ Rtsp.msgGetHeaderValue msg Rtsp.hdrSession
-                                 sid = maybe 0 id $ parseSessionId hdr
+                                 sid = maybe (-1) id $ parseSessionId hdr
                              in getOrNewSession rtsp sid
-                             
+
 parseSessionId :: String -> Maybe SessionId
 parseSessionId s = case reads s of
                       [] -> Nothing
                       [(sid, _)] -> Just sid
     
+-- | Fetches or creates a new RTSP session. When a new session is created has
+--   the side-effect of registering the session the the service state
+--
 getOrNewSession :: RtspService -> SessionId -> IO RtspSession
 getOrNewSession (Svc _ _ stateVar _) sid = do
-  now <- getPOSIXTime 
-  atomically $ do state <- readTVar stateVar
-                  let sessions = svcSessions state
-                  case Map.lookup sid sessions of
-                    Just sVar -> readTVar sVar
-                    Nothing -> let (sid, rng') = randomWord64 $ svcRng state
-                                   s = Session sid now
-                               in do snVar <- newTVar $! s
-                                     let sessions' = Map.insert sid snVar sessions
-                                     writeTVar stateVar $! state {svcRng = rng', svcSessions = sessions'}
-                                     return s
-  
--- | Cr
-newSession :: RtspService -> POSIXTime -> STM RtspSession
-newSession (Svc _ _ stateVar _) now = do 
-  state <- readTVar stateVar
-  let (sid, rng') = randomWord64 $ svcRng state
-  let sn = Session sid now
-  snVar <- newTVar sn
-  let svcSessions' = Map.insert sid snVar $ svcSessions state
-  writeTVar stateVar $! state {svcRng = rng', svcSessions = svcSessions'}
-  return sn
-  
-getSession :: RtspService -> SessionId -> STM (Maybe RtspSession)
-getSession (Svc _ _ stateVar _) sid = do
-  snVar <- readTVar stateVar >>= \state -> return $ Map.lookup sid $ svcSessions state
-  case snVar of 
-    Nothing -> return Nothing
-    Just v -> readTVar v >>= \sn -> return $ Just sn 
-
-genSessionId :: RtspService -> STM SessionId
-genSessionId (Svc _ _ stateVar _) = do
-  state <- readTVar stateVar
-  let (sid, rng') = randomWord64 $ svcRng state
-  writeTVar stateVar $! state {svcRng = rng'}
-  return sid
+    now <- getPOSIXTime 
+    atomically $ do state <- readTVar stateVar
+                    let sessions = svcSessions state
+                    case Map.lookup sid sessions of
+                      Just sVar -> readTVar sVar
+                      Nothing -> newSession now state $ svcRng state
+  where 
+    newSession :: POSIXTime -> ServiceState -> PureMT -> STM RtspSession
+    newSession now state rng = 
+      let sessions = svcSessions state
+          (n, rng') = randomWord64 rng
+          sid = fromIntegral n
+          s = Session sid now
+      in if sid `Map.member` sessions 
+           then newSession now state rng'
+           else do snVar <- newTVar $! s
+                   let sessions' = Map.insert sid snVar sessions
+                   writeTVar stateVar $! state {svcRng = rng', svcSessions = sessions'}
+                   return s
 
 serviceRealm :: RtspService -> Realm
 serviceRealm (Svc r _ _ _) = r
