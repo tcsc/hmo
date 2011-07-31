@@ -1,12 +1,14 @@
-module Headers(Headers,
-               empty,
-               get,
-               getHeaders,
-               set,
-               setValues,
-               fold,
-               Headers.map,
-               Headers.unitTests) 
+module Headers(
+  Headers,
+  empty,
+  get,
+  getHeaders,
+  set,
+  setValues,
+  fold,
+  Headers.fromList,
+  Headers.map,
+  Headers.unitTests) 
 where 
 
 import qualified Data.List as List

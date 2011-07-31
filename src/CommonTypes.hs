@@ -1,7 +1,6 @@
 module CommonTypes (
   UserId (..),
   UserInfo (..),
-  MediaType (..),
   MountPoint (..),
   UserRight (..),
   UserRights,
@@ -44,8 +43,10 @@ instance Bounded UserRight where
 
 type UserRights = [UserRight]
 
-data MediaType = Audio | Video | Text | Application | Message
-                 deriving(Eq, Show)
-
 fromUserInfo :: UserInfo -> UserId
 fromUserInfo (User userId userLogin _) = UserId userId userLogin 
+
+-- | Pipeline operator borrowed from f#
+(|>) :: a -> (a -> b) -> b
+(|>) x f = f x
+

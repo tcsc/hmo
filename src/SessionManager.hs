@@ -1,6 +1,8 @@
 module SessionManager(
   SessionManager,
   SessionError(..),
+  SessionResult,
+  SessionResultIO,
   newSessionManager,
   createSession,
   SessionManager.unitTests
@@ -9,6 +11,8 @@ module SessionManager(
 import Control.Concurrent (myThreadId)
 import Control.Concurrent.STM
 import Control.Monad.Error
+import Data.List
+import Data.Maybe
 import Test.HUnit
 
 import CommonTypes
@@ -16,6 +20,7 @@ import qualified FileSystem as Fs
 import qualified Logger as Log
 import Session
 import qualified Sdp as Sdp
+import SessionDescription
 import ScriptExecutor
 
 data SessionManager = SM ScriptExecutor (Fs.FileSystem FsNode)
@@ -25,8 +30,9 @@ data SessionError = Unauthorised
                   | AlreadyExists
                   | InternalError
                   | UnknownError String
+                  deriving (Eq, Show)
 
-data FsNode = FsSession Session
+data FsNode = FsSession MediaSession
             | FsStream MediaStream
 
 instance Error SessionError where
@@ -56,17 +62,43 @@ newSessionManager s = do
   fs <- atomically $ Fs.newFileSystem
   return (SM s fs)
   
-createSession :: SessionManager -> String -> Sdp.Description -> UserId -> SessionResultIO Session
+-- | Creates a new session at the specified location
+--
+createSession :: 
+  SessionManager -> 
+  String -> 
+  SessionDescription -> 
+  UserId -> 
+  SessionResultIO MediaSession
 createSession (SM scr fs) path desc uid = do
+    dbgL $ "Attempting to create session at " ++ path
     (mountPoint, rights) <- getInfo scr path uid
     if Broadcast `notElem` rights
-      then do liftIO $ debugLog "Not authorised"
+      then do dbgL "Not authorised"
               throwError Unauthorised 
-      else do s <- lift $ newSession desc uid
-              (liftFs $ Fs.register [(path, FsSession s)] fs)  `catchError` \sr -> do liftIO $ deleteSession s
-                                                                                      throwError sr
-              return s
-    
+      else do 
+        liftIO $ debugLog "Creating new session"
+        (session, uris) <- lift $ do s <- newSession desc uid
+                                     streams <- getStreams s
+                                     uris <- getStreamPaths path streams
+                                     return (s, uris)
+        
+        let nodes = foldl' (\ns (p,str) -> (p, FsStream str) : ns) 
+                           [(path, FsSession session)]
+                           uris 
+                             
+        catchError (liftFs $ Fs.register nodes fs)  
+                   (\sr -> do liftIO $ do debugLog $ "Error raised during session registraion: " ++ (show sr)
+                                          deleteSession session
+                              throwError sr)
+        return session
+  where
+     getStreamPaths :: String -> [MediaStream] -> IO [(String, MediaStream)]
+     getStreamPaths path streams = 
+       let root = if ((head . reverse) path) == '/' then path else path ++ "/"
+           concatUri s = streamUri s >>= \uri -> return ((root ++ uri), s)
+       in mapM concatUri streams
+       
 -- | 
 getInfo :: ScriptExecutor -> String -> UserId -> SessionResultIO (MountPoint, UserRights)
 getInfo scripts path uid = do
@@ -101,6 +133,8 @@ translateScriptIO x = do
 
 debugLog :: String -> IO ()
 debugLog = Log.debug "sessn"
+  
+dbgL = liftIO . debugLog
   
 infoLog :: String -> IO ()
 infoLog = Log.info "sessn"
