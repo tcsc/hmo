@@ -71,6 +71,7 @@ data AuthFailure = UnsupportedMechanism
                  | UnsupportedQoP
                  | MissingAuthorisation
                  | NoSuchUser
+                 | Unauthorized
                  deriving (Read, Show, Eq)
                  
 data AuthContext = AuthContext {

@@ -25,6 +25,7 @@ import Data.Maybe
 import Data.Time.Clock.POSIX
 import Data.Word
 import Data.Int
+import Network.URI
 import Network.Socket hiding (send, sendTo, recv, recvFrom)
 import Network.Socket.ByteString
 import System.Random.Mersenne.Pure64
@@ -37,6 +38,7 @@ import qualified Rtsp as Rtsp
 import qualified Sdp as Sdp
 import qualified Logger as Log
 import ScriptExecutor
+import SessionManager
 import Service
 
 -- ----------------------------------------------------------------------------
@@ -81,21 +83,23 @@ data RtspService = Svc {
   svcRealm        :: Realm,
   svcVersion      :: ServerVersion,
   svcState        :: StateVar,
-  svcDb           :: Db
+  svcDb           :: Db,
+  svcSessionMgr   :: SessionManager
 }
 
 -- | Initialises the RTSP service 
 newRtspService :: 
-  Realm ->         -- ^ The realm that the server will report when authenticating a client 
-  ServerVersion -> -- ^ The version string that the server will return on all responses
-  Db ->            -- ^ The user and account database to be used for authentication
+  Realm ->          -- ^ The realm that the server will report when authenticating a client 
+  ServerVersion ->  -- ^ The version string that the server will return on all responses
+  Db ->             -- ^ The user and account database to be used for authentication
+  SessionManager -> -- ^  
   IO RtspService
-newRtspService realm version db = 
+newRtspService realm version db sMgr = 
   let sessions = Map.empty
       contexts = Map.empty
   in do { rng <- newPureMT;
           svcVar <- newTVarIO $ SvcState rng sessions contexts 0;
-          return $ Svc realm version svcVar db; }
+          return $ Svc realm version svcVar db sMgr; }
 
 -- | Registers a new connection with the server and spawns the threads that
 --   will drive it. 
@@ -115,45 +119,102 @@ handleConnection svc maxData s =
   
 -- | Acts on an RTSP request from a client
 --
-handleRequest :: RtspService -> RtspConnection -> (Rtsp.Message, Rtsp.MessageBody) -> IO ()
-handleRequest svc conn (rq@(Rtsp.Request cseq method _ _ _), body) = do 
+handleRequest :: 
+  RtspService -> 
+  RtspConnection -> 
+  Rtsp.Message -> 
+  IO ()
+handleRequest svc conn msg@(rq@(Rtsp.Request cseq method _ _ _), body) = do 
   forkIO $ do response <- case method of
-                            "ANNOUNCE" -> handleAnnounce svc conn (rq, body)
+                            "OPTIONS" -> handleOptions cseq
+                            "ANNOUNCE" -> handleAnnounce svc conn msg
+                          --  "SETUP" -> handleSetup svc conn msg
                             _ -> return $ notImplemented cseq
               sendResponse conn response
   return () 
+  
+-- | Performs the supplied action and, depending on the result, either executes
+--   the supplied action or generates an appropriate RTSP error response. 
+--   
+withSessionResultDo :: 
+  RtspService -> 
+  RtspConnection -> 
+  Rtsp.Message -> 
+  SessionResultIO a ->      -- ^ 
+  (a -> IO Rtsp.Message) -> -- ^
+  IO Rtsp.Message
+withSessionResultDo rtsp conn (rq, _) result action = 
+  let cseq = Rtsp.msgSequence rq
+      connId = connectionId conn
+  in do
+    result <- runErrorT $ result 
+    case result of 
+      Right val -> action val
+      Left err -> case err of
+                    NotFound -> return $ emptyResponse Rtsp.NotFound cseq
+                    Unauthorised -> do ctx <- getAuthContext rtsp connId
+                                       return $ handleAuthFailure cseq ctx Unauthorized
+
+handleOptions :: Rtsp.SequenceNumber -> IO Rtsp.Message
+handleOptions cseq = 
+  let options = "ANNOUNCE, DESCRIBE, SETUP, PLAY, TEARDOWN"
+      hs = Headers.fromList [(Rtsp.hdrPublic, options)]
+      response = Rtsp.Response cseq Rtsp.OK hs
+  in return (response, Nothing)
 
 -- | Handles an RTSP announce request by trying to create a new session at the
 --   requested path.
 handleAnnounce :: 
-  RtspService ->                      -- ^ The RTSP service
-  RtspConnection ->                   -- ^ The RTSP connection that wants to create a session
-  (Rtsp.Message, Rtsp.MessageBody) -> -- ^ The RTSP request describing the session to create
-  IO (Rtsp.Message, Rtsp.MessageBody)
-handleAnnounce rtsp conn (rq, body) = 
-  let contentType = maybe "" (map toLower) $ Rtsp.msgGetHeaderValue rq "Content-Type"
+  RtspService ->    -- ^ The RTSP service
+  RtspConnection -> -- ^ The RTSP connection that wants to create a session
+  Rtsp.Message ->   -- ^ The RTSP request describing the session to create
+  IO (Rtsp.Message)
+handleAnnounce rtsp conn msg@(rq, body) = 
+  let contentType = maybe "" (map toLower) $ Rtsp.msgGetHeaderValue rq Rtsp.hdrContentType
       cseq = Rtsp.msgSequenceNumber rq
       sd = maybe Nothing Sdp.parse body
+      sMgr = svcSessionMgr rtsp
+      path = uriPath $ Rtsp.reqURI rq
+      withValidUserDo = withAuthenticatedUserDo rtsp conn rq
+      bind = withSessionResultDo rtsp conn msg
   in do
     if contentType /= "application/sdp" || sd == Nothing 
-      then do debugLog $ "unsupported session description format " ++ contentType ++ " or malformed description" 
-              return $ emptyResponse Rtsp.BadRequest cseq
-      else withAuthenticatedUserDo rtsp conn rq $ \_ -> return (notImplemented cseq)
-    
+      then return $ emptyResponse Rtsp.BadRequest cseq
+      else withValidUserDo $ \userId -> let desc = fromJust sd
+                                            s = createSession sMgr path desc userId
+                                        in do debugLog $ "Creating session at " ++ path
+                                              s `bind` \_ -> do debugLog "Session created"
+                                                                return $ ok cseq
+{-                              
+handleSetup ::
+  RtspService ->
+  RtspConnection ->
+  Rtsp.Message ->
+  IO (Rtsp.Message)
+handleSetup rtsp conn msg@(rq, body) = 
+  let cseq = Rtsp.msgSequenceNumber rq
+      hdr = maybe "" id $ Rtsp.msgGetHeaderValue rq Rtsp.hdrTransport
+      transport = Rtsp.parseTransport hdr
+  in do 
+    if hdr == "" || isNothing transport 
+      then return $ emptyRespnse Rtsp.BadRequest cseq
+      else return $ notImplemented cseq
+-}
+      
 -- | An action that will be executed if a request is properly
 --   authenticated.
-type AuthenticatedAction = UserId -> IO (Rtsp.Message, Rtsp.MessageBody)
+type AuthenticatedAction = UserId -> IO Rtsp.Message
 
 -- | Handles the authentication of a request. If the user's authentication
 --   checks out the fuction will apply the authenticated user to the supplied 
 --   action. If the user doesn't check out the function will generate a 
 --   request for authentication and return it to the client.
 withAuthenticatedUserDo :: 
-  RtspService  ->             -- ^ The current state of the RTSP server
-  RtspConnection ->           -- ^ The connection that we're trying to authenticate
-  Rtsp.Message ->             -- ^ The RTSP request to authenticate
-  AuthenticatedAction ->      -- ^ The action to run iff the user checks out
-  IO (Rtsp.Message, Rtsp.MessageBody) -- ^ Returns an RTSP response to send to the client   
+  RtspService  ->        -- ^ The current state of the RTSP server
+  RtspConnection ->      -- ^ The connection that we're trying to authenticate
+  Rtsp.MessageHeader ->  -- ^ The RTSP request to authenticate
+  AuthenticatedAction -> -- ^ The action to run iff the user checks out
+  IO Rtsp.Message        -- ^ Returns an RTSP response to send to the client   
 withAuthenticatedUserDo rtsp conn rq action =
   let realm = svcRealm rtsp
       cseq = Rtsp.msgSequence rq
@@ -165,15 +226,15 @@ withAuthenticatedUserDo rtsp conn rq action =
     debugLog $ "Authentication returned: " ++ (show userInfo)
     case userInfo of
       Right uid -> action uid
-      Left err -> return $ handleAuthFailure rtsp conn cseq ctx err
+      Left err -> return $ handleAuthFailure cseq ctx err
 
 -- | Authentcates a user - i.e. checks that the user exists and that their
 --   credentials match.
 --
 authenticate :: 
-  RtspService ->      -- ^ The RTSP service to authenticate against
-  Rtsp.Message ->     -- ^ The RTSP request that needs to be authenticated against
-  AuthContext ->      -- ^ The current authentication context for the connection
+  RtspService ->        -- ^ The RTSP service to authenticate against
+  Rtsp.MessageHeader -> -- ^ The RTSP request that needs to be authenticated against
+  AuthContext ->        -- ^ The current authentication context for the connection
   AuthResultIO UserId
 authenticate rtsp (Rtsp.Request _ verb uri _ hs) ctx = 
   let realm = svcRealm rtsp
@@ -194,13 +255,11 @@ authenticate rtsp (Rtsp.Request _ verb uri _ hs) ctx =
 --   connection state with a new authentication context if need be.
 --
 handleAuthFailure :: 
-  RtspService ->         -- ^ A reference to the RTSP service
-  RtspConnection ->      -- ^ The RTSP connection to authenticate  
   Rtsp.SequenceNumber -> -- ^ The sequence number of the RTSP request that failed authentication
   AuthContext ->         -- ^ The authoriseation context of the failed authentication request
   AuthFailure ->         -- ^ The reason that the authentication failed
-  (Rtsp.Message, Rtsp.MessageBody)
-handleAuthFailure rtsp@(Svc _ _ stateVar _) conn cseq ctx reason =
+  Rtsp.Message
+handleAuthFailure cseq ctx reason =
   let authHeaders = genAuthHeaders ctx reason
       hdrs = Headers.setValues Rtsp.hdrAuthenticate authHeaders Headers.empty
   in (Rtsp.Response cseq Rtsp.AuthorizationRequired hdrs, Nothing)
@@ -212,7 +271,7 @@ handleAuthFailure rtsp@(Svc _ _ stateVar _) conn cseq ctx reason =
 --   If the auth context is stale it wil be refreshed prior to being returned
 --
 getAuthContext :: RtspService -> ConnectionId -> IO AuthContext
-getAuthContext rtsp@(Svc _ _ stateVar _) connId = 
+getAuthContext rtsp@(Svc _ _ stateVar _ _) connId = 
     let realm = svcRealm rtsp
     in do now <- getPOSIXTime 
           atomically $ do state <- readTVar stateVar
@@ -236,17 +295,20 @@ getAuthContext rtsp@(Svc _ _ stateVar _) connId =
              in do writeTVar stateVar $! state {svcAuthContexts = ctxs'} 
                    return ctx'
                     
-badRequest :: (Rtsp.Message, Rtsp.MessageBody) 
+badRequest :: Rtsp.Message
 badRequest = emptyResponse Rtsp.BadRequest 0
 
-notImplemented :: Rtsp.SequenceNumber -> (Rtsp.Message, Rtsp.MessageBody) 
+ok ::  Rtsp.SequenceNumber -> Rtsp.Message
+ok = emptyResponse Rtsp.OK
+
+notImplemented :: Rtsp.SequenceNumber -> Rtsp.Message
 notImplemented = emptyResponse Rtsp.NotImplemented
 
 -- | Generates an empty (i.e. has no body) response with a given status value 
-emptyResponse :: Rtsp.Status -> Rtsp.SequenceNumber -> (Rtsp.Message, Rtsp.MessageBody)  
+emptyResponse :: Rtsp.Status -> Rtsp.SequenceNumber -> Rtsp.Message
 emptyResponse status cseq = (Rtsp.Response cseq status Headers.empty, Nothing)
     
-getMessageSession :: RtspService -> Rtsp.Message -> IO RtspSession
+getMessageSession :: RtspService -> Rtsp.MessageHeader -> IO RtspSession
 getMessageSession rtsp msg = let hdr = maybe "" id $ Rtsp.msgGetHeaderValue msg Rtsp.hdrSession
                                  sid = maybe (-1) id $ parseSessionId hdr
                              in getOrNewSession rtsp sid
@@ -260,7 +322,7 @@ parseSessionId s = case reads s of
 --   the side-effect of registering the session the the service state
 --
 getOrNewSession :: RtspService -> SessionId -> IO RtspSession
-getOrNewSession (Svc _ _ stateVar _) sid = do
+getOrNewSession (Svc _ _ stateVar _ _) sid = do
     now <- getPOSIXTime 
     atomically $ do state <- readTVar stateVar
                     let sessions = svcSessions state
@@ -283,13 +345,13 @@ getOrNewSession (Svc _ _ stateVar _) sid = do
                    return s
 
 serviceRealm :: RtspService -> Realm
-serviceRealm (Svc r _ _ _) = r
+serviceRealm (Svc r _ _ _ _) = r
 
 serviceVersion :: RtspService -> ServerVersion
-serviceVersion (Svc _ v _ _) = v
+serviceVersion (Svc _ v _ _ _) = v
 
 serviceDatabase :: RtspService -> Db
-serviceDatabase (Svc _ _ _ db) = db
+serviceDatabase (Svc _ _ _ db _) = db
 
 -- ----------------------------------------------------------------------------
 -- RTSP Connection Implementation
@@ -302,13 +364,13 @@ data ConnReply = NoReply
 
 type ReplyVar = TMVar ConnReply
   
-data ItemToSend = MsgItem Rtsp.Message Rtsp.MessageBody
+data ItemToSend = MsgItem Rtsp.Message
                 | Packet Rtsp.Packet
                 | QuitWriter
 
 data ConnMsg = Hello ReplyVar
-             | InboundRequest (Rtsp.Message, Rtsp.MessageBody)
-             | OutboundResponse (Rtsp.Message, Rtsp.MessageBody)
+             | InboundRequest Rtsp.Message
+             | OutboundResponse Rtsp.Message
              | InboundPacket Rtsp.Packet
              | GetItemToSend (TMVar ItemToSend)
              | BadRequest
@@ -332,7 +394,7 @@ data ConnInfo = State {
   writerThread    :: !ThreadId,
   writerReplyVar  :: !(Maybe (TMVar ItemToSend)),
   sendQueue       :: ![ItemToSend],
-  pendingMessages :: !(Map.Map Int Rtsp.Message)
+  pendingMessages :: !(Map.Map Int Rtsp.MessageHeader)
 }
 
 type RtspSvc = Service ConnMsg ConnReply ConnInfo
@@ -369,7 +431,7 @@ newConnection connId rtsp s maxData = do
       debugLog "Destroying connection"
       return ()
       
-sendResponse :: RtspConnection -> (Rtsp.Message, Rtsp.MessageBody) -> IO ()
+sendResponse :: RtspConnection -> Rtsp.Message -> IO ()
 sendResponse (MkConn _ svc) msg = post svc $! OutboundResponse msg
 
 -- | Handles a message from a client
@@ -401,16 +463,16 @@ handleCall message state =
       _ -> do errorLog $ "Unexpected command message: " ++ (show message)
               return (NoReply, state)
      
-sendOutboundMessage :: (Rtsp.Message, Rtsp.MessageBody) -> ConnInfo -> IO ConnInfo
+sendOutboundMessage :: Rtsp.Message -> ConnInfo -> IO ConnInfo
 sendOutboundMessage (msg, body) state = 
   let version = (serviceVersion . connRtspService) state
       msg' = Rtsp.msgSetHeaders msg [("Server", version)]
-  in putItemToSend (MsgItem msg' body) state
+  in putItemToSend (MsgItem (msg', body)) state
   
 processBadRequest :: ConnInfo -> IO ConnInfo
 processBadRequest state = 
   let (msg, body) = badRequest
-  in do state' <- putItemToSend (MsgItem msg body) (clearQueue state)
+  in do state' <- putItemToSend (MsgItem (msg, body)) (clearQueue state)
         disconnect state'
   
 disconnect :: ConnInfo -> IO ConnInfo
@@ -439,7 +501,7 @@ runScript action = do
     Left e -> throw e    
     
 -- | 
-internalServerError :: Int -> Rtsp.Message
+internalServerError :: Int -> Rtsp.MessageHeader
 internalServerError sq = Rtsp.Response sq Rtsp.InternalServerError Headers.empty
  
 -- | Puts an item in the send queue. Note that if the writer thread is waiting
@@ -490,11 +552,11 @@ writer s svc = do
                 writeLoop s svc rx
       
     format :: ItemToSend -> B.ByteString
-    format (MsgItem msg body) = Rtsp.formatMessage msg body
+    format (MsgItem (msg, body)) = Rtsp.formatMessage msg body
     format (Packet p) = Rtsp.formatPacket p
       
 -- | The state block for the reader thread
-data ReaderState = RS (Maybe Rtsp.Message) Int
+data ReaderState = RS (Maybe Rtsp.MessageHeader) Int
   deriving (Show)
       
 -- | The main reader loop. Reads data from the network, parses it and sends the

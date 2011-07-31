@@ -60,6 +60,7 @@ clean:
 obj/WorkerTypes.o : src/WorkerTypes.hs
 obj/WorkerPool.o : src/WorkerPool.hs
 obj/WorkerPool.o : obj/WorkerTypes.hi
+obj/SessionDescription.o : src/SessionDescription.hs
 obj/Service.o : src/Service.hs
 obj/Service.o : obj/WorkerTypes.hi
 obj/Signals.o : src/Signals.hs
@@ -94,6 +95,7 @@ obj/Rtsp.o : obj/Parsec.hi
 obj/Rtsp.o : obj/Headers.hi
 obj/Rtsp.o : obj/Multimap.hi
 obj/Sdp.o : src/Sdp.hs
+obj/Sdp.o : obj/SessionDescription.hi
 obj/Sdp.o : obj/CommonTypes.hi
 obj/Sdp.o : obj/Parsec.hi
 obj/Session.o : src/Session.hs
@@ -114,6 +116,7 @@ obj/Authentication.o : obj/Parsec.hi
 obj/Authentication.o : obj/CommonTypes.hi
 obj/RtspService.o : src/RtspService.hs
 obj/RtspService.o : obj/Service.hi
+obj/RtspService.o : obj/SessionManager.hi
 obj/RtspService.o : obj/ScriptExecutor.hi
 obj/RtspService.o : obj/Logger.hi
 obj/RtspService.o : obj/Sdp.hi

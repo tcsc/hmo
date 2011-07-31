@@ -60,7 +60,7 @@ main = withSocketsDo $ do
         sessionManager <- newSessionManager scripting
 
         infoLog "Creating RTSP Service"
-        rtspSvc <- createRtspService scripting config
+        rtspSvc <- createRtspService scripting sessionManager config
 
         infoLog "Creating TCP listeners for RTSP"        
         listener <- newListener
@@ -73,11 +73,11 @@ main = withSocketsDo $ do
         stopListener listener
         infoLog "Exiting"
   where 
-    createRtspService :: ScriptExecutor -> Config -> IO RtspService
-    createRtspService scripts cfg = let rtspCfg = rtspConfig cfg
-                                        realm = rtspRealm rtspCfg
-                                        svr = rtspServerString rtspCfg
-                                    in newRtspService realm svr scripts
+    createRtspService :: ScriptExecutor -> SessionManager -> Config -> IO RtspService
+    createRtspService scripts sMgr cfg = let rtspCfg = rtspConfig cfg
+                                             realm = rtspRealm rtspCfg
+                                             svr = rtspServerString rtspCfg
+                                         in newRtspService realm svr scripts sMgr
 
     startRtsp :: TcpListener -> RtspService -> Config -> IO ()
     startRtsp listener service cfg = do

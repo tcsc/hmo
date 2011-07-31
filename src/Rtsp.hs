@@ -1,7 +1,8 @@
 {-# LANGUAGE NoMonomorphismRestriction #-}
 
 module Rtsp (
-  Message (..),
+  Message,
+  MessageHeader(..),
   MessageBody,
   SequenceNumber,
   Packet (..),
@@ -13,6 +14,9 @@ module Rtsp (
   parseMessage,
   formatMessage,
   formatPacket,
+  hdrContentType,
+  hdrTransport,
+  hdrPublic,
   hdrSession,
   hdrAuthenticate,
   msgSequence,
@@ -21,6 +25,7 @@ module Rtsp (
   msgSetHeaders,
   msgSequenceNumber,
   msgContentLength,
+  reqURI,
   Rtsp.unitTests
 ) where
 
@@ -71,54 +76,65 @@ type Method = String
 type SequenceNumber = Int
 type Version = (Int, Int)
 
-data Message = Request SequenceNumber Method   URI Version Headers.Headers
-             | Response SequenceNumber Status Headers.Headers
+data MessageHeader = Request SequenceNumber Method URI Version Headers.Headers
+                   | Response SequenceNumber Status Headers.Headers
 
 type MessageBody = Maybe B.ByteString
+
+type Message = (MessageHeader, MessageBody)
              
 data Packet = Packet Int B.ByteString deriving (Show)
   
-instance Show Message where 
+instance Show MessageHeader where 
   show (Request s v u _ hs) = "#" ++ (show s) ++ " " ++ (show v) ++ " " ++ (show u) 
                                 -- ++ "\n" 
                                 -- ++ (intercalate "\n" $ Headers.map (\(n,v) -> n ++ ": " ++ v) hs) 
   show (Response _ s _) = (show s) 
 
 -- | gets the sequence number of a message
-msgSequence :: Message -> Int
+msgSequence :: MessageHeader -> Int
 msgSequence (Request s _ _ _ _ ) = s 
 msgSequence (Response s _ _) = s 
 
-msgHeaders :: Message -> Headers.Headers
+msgHeaders :: MessageHeader -> Headers.Headers
 msgHeaders (Request _ _ _ _ hs) = hs 
 msgHeaders (Response _ _ hs) = hs 
 
-msgGetHeaderValue :: Message -> String -> Maybe String
+msgGetHeaderValue :: MessageHeader -> String -> Maybe String
 msgGetHeaderValue msg n = Headers.get n $ msgHeaders msg
 
-msgSetHeaders :: Message -> [(String, String)] -> Message
+msgSetHeaders :: MessageHeader -> [(String, String)] -> MessageHeader
 msgSetHeaders (Response cseq stat hs) values = 
   let hs' = foldl' (\h (n, v) -> Headers.set n v h) hs values
   in Response cseq stat hs'
 
-msgSequenceNumber :: Message -> SequenceNumber
+msgSequenceNumber :: MessageHeader -> SequenceNumber
 msgSequenceNumber (Request cseq _ _ _ _) = cseq
 msgSequenceNumber (Response cseq _ _) = cseq
 
-msgContentLength :: Message -> Int
+msgContentLength :: MessageHeader -> Int
 msgContentLength (Request _ _ _ _ hs) = maybe 0 fromIntegral (contentLength hs)
 msgContentLength (Response _ _ _) = 0 
 
 -- | Fills in the missing bits of a half-parsed message once we know what they are
-msgUpdate :: Int -> Headers.Headers -> Message -> Message
+msgUpdate :: Int -> Headers.Headers -> MessageHeader -> MessageHeader
 msgUpdate s headers (Request _ verb uri ver _) = Request s verb uri ver headers
 msgUpdate s headers (Response _ status _) = Response s status headers  
 
+reqURI :: MessageHeader -> URI
+reqURI (Request _ _ uri _ _) = uri
+
 -- | 
-parseMessage :: B.ByteString -> Maybe Message
+parseMessage :: B.ByteString -> Maybe MessageHeader
 parseMessage bytes = case parse message "" bytes of
                        Left _ -> Nothing
                        Right msg -> Just msg
+
+hdrContentType = "Content-Type" :: String
+hdrTransport = "Transport" :: String
+
+hdrPublic :: String
+hdrPublic = "Public"
 
 hdrSession :: String
 hdrSession = "Session"
@@ -233,11 +249,17 @@ fromStatus :: Status -> Int
 fromStatus (Unknown n) = n 
 fromStatus s = (Bimap.!>) statusMap s
 
+{-
+parseTransport :: String -> Maybe TransportSpec
+parseTransport s = case parse transport "" s of
+                     Left _   -> Nothing
+                     Right elems -> 
+-}              
 -- ----------------------------------------------------------------------------
 -- RTSP formatter
 -- ----------------------------------------------------------------------------
 
-formatMessage :: Message -> Maybe B.ByteString -> B.ByteString
+formatMessage :: MessageHeader -> Maybe B.ByteString -> B.ByteString
 formatMessage (Request s v uri ver hs) _ = B.empty
 formatMessage (Response sq status hs) body = 
   let responseLine = B.concat $ intersperse (Utf8.fromString " ") [
@@ -357,15 +379,17 @@ testParsePacketNotEnoughData = TestCase (do
     let mp = embeddedPacket bytes
     assertBool "Parse failed" (isNothing mp))
   
-testParseVerb s = fromRight $ parse verb "" (Utf8.fromString s) 
-  
-testVerbs = TestList [
-  "Parse Describe" ~: Describe         ~=? testParseVerb "DESCRIBE",
-  "Parse Announce" ~: Announce         ~=? testParseVerb "ANNOUNCE",
-  "Parse Setup"    ~: Setup            ~=? testParseVerb "SETUP",
-  "Parse Play"     ~: Play             ~=? testParseVerb "PLAY",
-  "Parse Teardown" ~: Teardown         ~=? testParseVerb "TEARDOWN",
-  "Other"          ~: OtherVerb "narf" ~=? testParseVerb "narf"]
+testParseUnicastTransport = "RTP/AVP;unicast;client_port=6970-6971;mode=receive"
+
+testVerbs = 
+  let testParseVerb s = fromRight $ parse verb "" (Utf8.fromString s) 
+  in TestList [
+    "Parse Describe" ~: Describe         ~=? testParseVerb "DESCRIBE",
+    "Parse Announce" ~: Announce         ~=? testParseVerb "ANNOUNCE",
+    "Parse Setup"    ~: Setup            ~=? testParseVerb "SETUP",
+    "Parse Play"     ~: Play             ~=? testParseVerb "PLAY",
+    "Parse Teardown" ~: Teardown         ~=? testParseVerb "TEARDOWN",
+    "Other"          ~: OtherVerb "narf" ~=? testParseVerb "narf"]
 
 testStatusToEnum = TestList [
   "OK"                ~: OK                  ~=? Rtsp.toStatus 200,
@@ -381,11 +405,12 @@ testStatusToEnum = TestList [
   "Unsupported Opt"   ~: OptionNotSupported  ~=? Rtsp.toStatus 551,
   "Unknown"           ~: Unknown 0           ~=? Rtsp.toStatus 0]
 
-unitTests = TestList [TestLabel "Parse Minimal Request" testParseMinimalRequest,
-                      TestLabel "Format Minimal Response" testFormatMinimalResponse,
-                      TestLabel "Format Body Response" testFormatResponseWithBody,
-                      TestLabel "Parse Request - Bad Status" testParseBadStatusResponse,
-                      TestLabel "Packet Parsing - simple" testParsePacket,
-                      TestLabel "Packet Parsing - insuffcient data" testParsePacketNotEnoughData,
-                      testVerbs,
-                      testStatusToEnum]
+unitTests = TestList [
+  TestLabel "Parse Minimal Request" testParseMinimalRequest,
+  TestLabel "Format Minimal Response" testFormatMinimalResponse,
+  TestLabel "Format Body Response" testFormatResponseWithBody,
+  TestLabel "Parse Request - Bad Status" testParseBadStatusResponse,
+  TestLabel "Packet Parsing - simple" testParsePacket,
+  TestLabel "Packet Parsing - insuffcient data" testParsePacketNotEnoughData,
+  testVerbs,
+  testStatusToEnum ]
