@@ -12,7 +12,7 @@ PACKAGES = base base64-string bimap binary binary-strict bytestring containers  
            MissingH mtl network parsec pureMD5 stm stringsearch utf8-string
 
 # platform-specific changes
-ifeq ($(UNAME), MinGW)
+ifeq ($(UNAME), windows32)
 SYSPACKAGES = Win32
 else
 SYSPACKAGES = unix
