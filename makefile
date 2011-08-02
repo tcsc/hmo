@@ -63,6 +63,9 @@ obj/WorkerPool.o : obj/WorkerTypes.hi
 obj/SessionDescription.o : src/SessionDescription.hs
 obj/Service.o : src/Service.hs
 obj/Service.o : obj/WorkerTypes.hi
+obj/Rtp.o : src/Rtp.hs
+obj/RtpTransport.o : src/RtpTransport.hs
+obj/RtpTransport.o : obj/Rtp.hi
 obj/Signals.o : src/Signals.hs
 obj/Multimap.o : src/Multimap.hs
 obj/Flags.o : src/Flags.hs
@@ -89,6 +92,11 @@ obj/ScriptExecutor.o : obj/Flags.hi
 obj/ScriptExecutor.o : obj/LuaUtils.hi
 obj/ScriptExecutor.o : obj/Logger.hi
 obj/ScriptExecutor.o : obj/CommonTypes.hi
+obj/Session.o : src/Session.hs
+obj/Session.o : obj/Logger.hi
+obj/Session.o : obj/SessionDescription.hi
+obj/Session.o : obj/Service.hi
+obj/Session.o : obj/CommonTypes.hi
 obj/Parsec.o : src/Parsec.hs
 obj/Rtsp.o : src/Rtsp.hs
 obj/Rtsp.o : obj/Parsec.hi
@@ -98,12 +106,9 @@ obj/Sdp.o : src/Sdp.hs
 obj/Sdp.o : obj/SessionDescription.hi
 obj/Sdp.o : obj/CommonTypes.hi
 obj/Sdp.o : obj/Parsec.hi
-obj/Session.o : src/Session.hs
-obj/Session.o : obj/Sdp.hi
-obj/Session.o : obj/Service.hi
-obj/Session.o : obj/CommonTypes.hi
 obj/SessionManager.o : src/SessionManager.hs
 obj/SessionManager.o : obj/ScriptExecutor.hi
+obj/SessionManager.o : obj/SessionDescription.hi
 obj/SessionManager.o : obj/Sdp.hi
 obj/SessionManager.o : obj/Session.hi
 obj/SessionManager.o : obj/Logger.hi
