@@ -38,6 +38,7 @@ import qualified Rtsp as Rtsp
 import qualified Sdp as Sdp
 import qualified Logger as Log
 import RtpTransport
+import RtpReceiver
 import ScriptExecutor
 import SessionManager
 import Service
@@ -61,10 +62,8 @@ type ConnectionId = Int
 -- | State data for each sesison
 data RtspSession = Session {
   sessionId           :: !SessionId,
-  sessionActivitiy    :: !POSIXTime
-  --,
-  --sessionTransmitters :: ![RtpTransmitter],
-  --  sessionReceivers    :: ![RtpReceiver]
+  sessionActivitiy    :: !POSIXTime,
+  sessionReceivers    :: ![RtpReceiver]
 }
 
 type SessionVar = TVar RtspSession
@@ -200,7 +199,7 @@ handleSetup ::
   RtspConnection ->
   Rtsp.Message ->
   IO (Rtsp.Message)
-handleSetup rtsp conn msg@(rq, body) = 
+handleSetup rtsp@(Svc _ _ stateVar _ _) conn msg@(rq, body) = 
   let cseq = Rtsp.msgSequenceNumber rq
       sMgr = svcSessionMgr rtsp
       path = uriPath $ Rtsp.reqURI rq
@@ -213,7 +212,7 @@ handleSetup rtsp conn msg@(rq, body) =
       Just t -> do 
         rtspSession <- getMessageSession rtsp rq
         withMaybeValidUserDo $ \maybeUserId -> do 
-          x <- runErrorT $ runSetup rtspSession t maybeUserId
+          x <- runErrorT $ runSetup path rtspSession t maybeUserId
           case x of
             Right transport -> let hs = Headers.fromList [
                                           (Rtsp.hdrTransport, show $ transportGetSpec transport), 
@@ -222,24 +221,44 @@ handleSetup rtsp conn msg@(rq, body) =
             Left s -> return $ emptyResponse s cseq
                
   where
-    runSetup :: RtspSession -> TransportSpec -> (Maybe UserId) -> RtspResultIO RtpTransport
-    runSetup session clientSpec user = 
-      let mode = \t -> maybe Play (\(Mode m) -> m) $ find isModeParameter t
-      in do 
-        debugL $ "Creating new RTP transport for " ++ (show clientSpec) 
-        transport <- newRtpTransport clientSpec conn
-        -- add binding to actual session/stream here
-        return transport
-        
-        
-{-        case mode t of
-          Record -> do --  (rtpRx, rtspSession') <- createRtpReceiver transport rtspSession
-                       --  let chunkRx = getChunkRx rtpRx 
-                       --  registerSource sMgr path userId rhunkRx 
-                                     return () } `catchError` \e -> transportDestroy transport
-                                                                    throwError e
--}
-      
+    runSetup :: String -> RtspSession -> TransportSpec -> (Maybe UserId) -> RtspResultIO RtpTransport
+    runSetup path session clientSpec user = 
+      let mode = \t -> maybe Play (\(Mode m) -> m) $ find isModeParameter $ transportParams t
+      in do debugL $ "Creating new RTP transport for " ++ (show clientSpec) 
+            transport <- newRtpTransport clientSpec conn
+            session' <- case mode clientSpec of 
+                          Record -> registerSource path transport session user
+                          -- Play -> 
+            liftIO $ updateSession rtsp session'
+            return transport
+            
+    registerSource :: String -> RtpTransport -> RtspSession -> (Maybe UserId) -> RtspResultIO RtspSession 
+    registerSource path transport session user = 
+      let sMgr = svcSessionMgr rtsp
+      in do rval <- liftIO $ do (rx, s') <- createRtpReceiver transport session
+                                src <- getChunkSource rx
+                                x <- runErrorT $ bindStreamSource sMgr path src user
+                                case x of 
+                                  Right _ -> return $ Right s'
+                                  Left e -> do destroyRtpReceiver rx
+                                               return $ Left e
+            case rval of 
+              Right s' -> return s'
+              Left e -> throwError (translateSessionError e)         
+                                                        
+    createRtpReceiver :: RtpTransport -> RtspSession -> IO (RtpReceiver, RtspSession)
+    createRtpReceiver transport session = 
+      let rxs = sessionReceivers session 
+      in do rx <- newRtpReceiver transport 
+            let session' = session { sessionReceivers = rx : rxs }
+            return (rx, session')
+            
+translateSessionError :: SessionError -> Rtsp.Status
+translateSessionError err = 
+  case err of 
+    Unauthorised -> Rtsp.AuthorizationRequired
+    _ -> Rtsp.InternalServerError
+              
 newRtpTransport :: TransportSpec -> RtspConnection -> RtspResultIO RtpTransport
 newRtpTransport t conn = 
   let protocol = transportLowerTransport t
@@ -396,6 +415,15 @@ getMessageSession :: RtspService -> Rtsp.MessageHeader -> IO RtspSession
 getMessageSession rtsp msg = let hdr = maybe "" id $ Rtsp.msgGetHeaderValue msg Rtsp.hdrSession
                                  sid = maybe (-1) id $ parseSessionId hdr
                              in getOrNewSession rtsp sid
+                             
+updateSession :: RtspService -> RtspSession -> IO ()
+updateSession (Svc _ _ stateVar _ _)  session = 
+  let sid = sessionId session
+  in atomically $ do state <- readTVar stateVar
+                     let sessions = svcSessions state
+                     case Map.lookup sid sessions of
+                       Just snVar -> writeTVar snVar session
+                       Nothing -> return ()
 
 parseSessionId :: String -> Maybe SessionId
 parseSessionId s = case reads s of
@@ -420,7 +448,7 @@ getOrNewSession (Svc _ _ stateVar _ _) sid = do
       let sessions = svcSessions state
           (n, rng') = randomWord64 rng
           sid = fromIntegral n
-          s = Session sid now
+          s = Session sid now []
       in if sid `Map.member` sessions 
            then newSession now state rng'
            else do snVar <- newTVar $! s
@@ -630,13 +658,16 @@ createInterleavedTransport conn@(MkConn _ svc) proposed@(rtp, rtcp) state =
     then (Error, state)
     else (Transport transport, state {connChannels = channels'})
     
--- | Removes the specified channels from the 
+-- | Removes the specified channels from the connections map of channel ids
+--
 destroyInterleavedChannels :: [ChannelId] -> ConnInfo -> ConnInfo
 destroyInterleavedChannels cs state = 
   let channels' = Map.filterWithKey (\x _ -> x `notElem` cs) $ connChannels state
   in channels' `seq` state {connChannels = channels'}
   
--- | Binds the channels 
+-- | Binds the interleaved channels to the handlers that will receive the
+--   packets delivered on them.
+--
 registerTransportCallbacks :: RtspConnection -> [(ChannelId, PacketHandler)] -> IO ()
 registerTransportCallbacks (MkConn _ svc) handlers = do 
   call svc $ SetChannelHandlers handlers
@@ -678,7 +709,8 @@ internalServerError sq = Rtsp.Response sq Rtsp.InternalServerError Headers.empty
 --   on something to send, this function will wake it up and pass the supplied 
 --   item directly to it, bypassing the queue.
 -- 
---   This should only ever be called on the connection thread.
+--   This should only ever be called on the connection's message-procesisng 
+--   thread.
 --
 putItemToSend :: ItemToSend -> ConnInfo -> IO ConnInfo
 putItemToSend item state = do 
