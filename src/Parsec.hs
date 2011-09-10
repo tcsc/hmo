@@ -6,10 +6,14 @@ module Parsec(
   hexInteger, 
   maybeInt, 
   isImplicit, 
-  URI) where
+  quoted,
+  optionallyQuoted,
+  caseInsensitiveString,
+  URI ) where
 
 import Network.URI  
-import Data.Char (digitToInt)
+import Data.Char (digitToInt, toLower, toUpper, isAlpha)
+import Data.Maybe
 import Text.Parsec
 import Text.Parsec.Combinator
 import Text.Parsec.Char
@@ -50,3 +54,20 @@ maybeInt s = case (reads s :: [(Integer, String)]) of
                [] -> Nothing
                [(n, _)] -> Just n
 
+quoted p = do char '\"'
+              x <- p 
+              char '\"'
+              return x
+              
+optionallyQuoted p = do q <- optionMaybe $ char '\"';
+                        v <- p
+                        if isNothing q then return () 
+                                       else do { char '\"'; return (); };
+                        return v
+
+caseInsensitiveString s = do { walk s; return s; }
+  where walk []     = return ()
+        walk (c:cs) = do { caseChar c <?> msg; walk cs }
+        caseChar c  | isAlpha c  = char (toLower c) <|> char (toUpper c)
+                    | otherwise  = char c
+        msg         = show s

@@ -7,6 +7,12 @@ module Service(
   post
 ) 
 where 
+
+-- | An erlang-style gen_service framework. Note that this service framework
+--   imposes strict evaluation semantics on the service's state data, in that
+--   the framework will force the evaluation of the service state after each
+--   message is processed.
+--
   
 import Control.Exception(SomeException, bracket, try)
 import Control.Concurrent (ThreadId, forkIO, myThreadId)
@@ -40,9 +46,8 @@ type ServiceHandler msg   -- ^ The range of possible messages
                     state -- ^ An opaque per-thread state block for the owner
                     = msg -> state -> IO (reply, state)
 
-
--- | An erlang-style gen_service framework
-
+-- | Creates a new service instance using the given setup, teardown and
+--   processing functions.
 newService :: ServiceSetup msg rpy state -> 
               ServiceHandler msg rpy state -> 
               ServiceTeardown state -> IO (Service msg rpy state)
@@ -66,22 +71,28 @@ stopServiceInternal (Svc q) = do
   atomically $ writeTChan q (ExitSvc replyVar)
   return replyVar
 
---  | Asks the service to perform some task and does not wait for a reply
+--  | Asks the service to perform some task and does not wait for a reply. Note
+--    that the message value will be evaluated BEFORE being sent to the message
+--    processing thread. 
 post :: Service msg rpy state -> msg -> IO ()
 post (Svc q) msg = do
   replyVar <- newEmptyTMVarIO
-  atomically $ writeTChan q (Cast msg)   
+  atomically $ writeTChan q (Cast $! msg)   
 
--- | Asks the service to perform some task and waits for a reply
+-- | Asks the service to perform some task and waits for a reply. Note
+--   that the message value will be evaluated BEFORE being sent to the message
+--   processing thread.
 call :: Service msg rpy state -> msg -> IO rpy
 call (Svc q) msg = do
   replyVar <- newEmptyTMVarIO
-  atomically $ writeTChan q (Call msg replyVar)   
+  atomically $ writeTChan q (Call (msg `seq` msg) replyVar)   
   atomically $ takeTMVar replyVar
   
 callWithTimeout :: Service msg rpy state -> msg -> Int -> IO (Maybe rpy)
 callWithTimeout svc msg t = timeout t $ call svc msg
   
+-- | Note that the server loop forces evaluation of the state data after each
+--   message is processed.
 serverThread :: WorkerSetup s -> MessageHandler msg rpy s -> WorkerTeardown s -> SvcQ msg rpy -> IO ()
 serverThread setup handler teardown msgq = bracket (setup) (teardown) (loop msgq handler)
   where
@@ -95,11 +106,11 @@ serverThread setup handler teardown msgq = bracket (setup) (teardown) (loop msgq
           
         Cast msg -> do
           (_, state') <- hdlr msg state
-          loop q hdlr state'
+          loop q hdlr $! state'
           
         Call msg rpyVar -> do
           (reply, state') <- hdlr msg state
           atomically $ putTMVar rpyVar reply 
-          loop q hdlr state'
+          loop q hdlr $! state'
           
           

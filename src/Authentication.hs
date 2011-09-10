@@ -297,22 +297,13 @@ fmtQop qop = case qop of
               QopAuth -> "auth"
               QopAuthInt -> "auth-int"
               QopOther s -> s
-
-optionallyQuoted p = do q <- optionMaybe $ char '\"';
-                        v <- p
-                        if isNothing q then return () 
-                                       else do { char '\"'; return (); };
-                        return v  
   
 stringValue name cons = do try $ string name
                            char '='
                            v <- quotedString
                            return $ cons v
           
-quotedString = do char '\"'
-                  s <- many $ satisfy (/= '\"')
-                  char '\"'
-                  return s
+quotedString = quoted (many $ satisfy (/= '\"'))
                   
 authToken = many1 letter
                   

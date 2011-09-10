@@ -37,6 +37,7 @@ import qualified Headers as Headers
 import qualified Rtsp as Rtsp
 import qualified Sdp as Sdp
 import qualified Logger as Log
+import RtpTransport
 import ScriptExecutor
 import SessionManager
 import Service
@@ -57,9 +58,13 @@ type SessionId = Int64
 
 type ConnectionId = Int
 
+-- | State data for each sesison
 data RtspSession = Session {
-  sessionId       :: !SessionId,
-  snLastActivitiy :: !POSIXTime
+  sessionId           :: !SessionId,
+  sessionActivitiy    :: !POSIXTime
+  --,
+  --sessionTransmitters :: ![RtpTransmitter],
+  --  sessionReceivers    :: ![RtpReceiver]
 }
 
 type SessionVar = TVar RtspSession
@@ -73,6 +78,9 @@ type StateVar = TVar ServiceState
 type Realm = String
 
 type ServerVersion = String
+
+-- | An RTSP error type to help with sequencing actions that can fail
+type RtspResultIO = ErrorT Rtsp.Status IO
 
 -- | A type alias that better reflects the use of the ScriptExecutor within the
 --   context of the RTSP service. 
@@ -128,7 +136,7 @@ handleRequest svc conn msg@(rq@(Rtsp.Request cseq method _ _ _), body) = do
   forkIO $ do response <- case method of
                             "OPTIONS" -> handleOptions cseq
                             "ANNOUNCE" -> handleAnnounce svc conn msg
-                          --  "SETUP" -> handleSetup svc conn msg
+                            "SETUP" -> handleSetup svc conn msg
                             _ -> return $ notImplemented cseq
               sendResponse conn response
   return () 
@@ -157,7 +165,7 @@ withSessionResultDo rtsp conn (rq, _) result action =
 
 handleOptions :: Rtsp.SequenceNumber -> IO Rtsp.Message
 handleOptions cseq = 
-  let options = "ANNOUNCE, DESCRIBE, SETUP, PLAY, TEARDOWN"
+  let options = "ANNOUNCE, DESCRIBE, SETUP, PLAY, TEARDOWN, RECORD"
       hs = Headers.fromList [(Rtsp.hdrPublic, options)]
       response = Rtsp.Response cseq Rtsp.OK hs
   in return (response, Nothing)
@@ -185,7 +193,8 @@ handleAnnounce rtsp conn msg@(rq, body) =
                                         in do debugLog $ "Creating session at " ++ path
                                               s `bind` \_ -> do debugLog "Session created"
                                                                 return $ ok cseq
-{-                              
+
+-- | Handles a SETUP request for an individual stream
 handleSetup ::
   RtspService ->
   RtspConnection ->
@@ -193,13 +202,54 @@ handleSetup ::
   IO (Rtsp.Message)
 handleSetup rtsp conn msg@(rq, body) = 
   let cseq = Rtsp.msgSequenceNumber rq
+      sMgr = svcSessionMgr rtsp
+      path = uriPath $ Rtsp.reqURI rq
       hdr = maybe "" id $ Rtsp.msgGetHeaderValue rq Rtsp.hdrTransport
-      transport = Rtsp.parseTransport hdr
+      transportSpec = Rtsp.parseTransport hdr
+      withMaybeValidUserDo = withMaybeAuthenticatedUserDo rtsp conn rq
   in do 
-    if hdr == "" || isNothing transport 
-      then return $ emptyRespnse Rtsp.BadRequest cseq
-      else return $ notImplemented cseq
+    case transportSpec of 
+      Nothing -> return $ emptyResponse Rtsp.BadRequest cseq
+      Just t -> do 
+        rtspSession <- getMessageSession rtsp rq
+        withMaybeValidUserDo $ \maybeUserId -> do 
+          x <- runErrorT $ runSetup rtspSession t maybeUserId
+          case x of
+            Right transport -> let hs = Headers.fromList [
+                                          (Rtsp.hdrTransport, show $ transportGetSpec transport), 
+                                          (Rtsp.hdrSession, show $ sessionId rtspSession)]
+                               in return $ (Rtsp.Response cseq Rtsp.OK hs, Nothing)
+            Left s -> return $ emptyResponse s cseq
+               
+  where
+    runSetup :: RtspSession -> TransportSpec -> (Maybe UserId) -> RtspResultIO RtpTransport
+    runSetup session clientSpec user = 
+      let mode = \t -> maybe Play (\(Mode m) -> m) $ find isModeParameter t
+      in do 
+        debugL $ "Creating new RTP transport for " ++ (show clientSpec) 
+        transport <- newRtpTransport clientSpec conn
+        -- add binding to actual session/stream here
+        return transport
+        
+        
+{-        case mode t of
+          Record -> do --  (rtpRx, rtspSession') <- createRtpReceiver transport rtspSession
+                       --  let chunkRx = getChunkRx rtpRx 
+                       --  registerSource sMgr path userId rhunkRx 
+                                     return () } `catchError` \e -> transportDestroy transport
+                                                                    throwError e
 -}
+      
+newRtpTransport :: TransportSpec -> RtspConnection -> RtspResultIO RtpTransport
+newRtpTransport t conn = 
+  let protocol = transportLowerTransport t
+  in do case protocol of
+          TCP -> newRtspTransport conn t
+          _ -> throwError Rtsp.UnsupportedTransport
+      
+-- | Creates an RTP receiver (an RTP receiver translates RTP packets into
+--   chunks that the stream can use) 
+--createRtpReceiver conn transport session = 
       
 -- | An action that will be executed if a request is properly
 --   authenticated.
@@ -215,18 +265,52 @@ withAuthenticatedUserDo ::
   Rtsp.MessageHeader ->  -- ^ The RTSP request to authenticate
   AuthenticatedAction -> -- ^ The action to run iff the user checks out
   IO Rtsp.Message        -- ^ Returns an RTSP response to send to the client   
-withAuthenticatedUserDo rtsp conn rq action =
+withAuthenticatedUserDo rtsp conn rq action = 
+  let cseq = Rtsp.msgSequence rq 
+      connId = connectionId conn 
+  in do
+    ctx <- getAuthContext rtsp connId 
+    withAuthenticationResultDo rtsp conn ctx rq $ \ar -> 
+      case ar of
+        Right uid -> action uid
+        Left err  -> return $ handleAuthFailure cseq ctx err
+
+-- | Handles the authentication of a request, but does *not* automatically
+--   fail the transaction if there is no authentication header.  
+withMaybeAuthenticatedUserDo ::
+  RtspService  ->                      -- ^ The current state of the RTSP server
+  RtspConnection ->                    -- ^ The connection that we're trying to authenticate
+  Rtsp.MessageHeader ->                -- ^ The RTSP request to authenticate
+  (Maybe UserId -> IO Rtsp.Message) -> -- ^ The action to run if the user checks out
+  IO Rtsp.Message                      -- ^ Returns an RTSP response to send to the client   
+withMaybeAuthenticatedUserDo rtsp conn rq action = 
+  let cseq = Rtsp.msgSequence rq
+      connId = connectionId conn 
+  in do
+    ctx <- getAuthContext rtsp connId 
+    withAuthenticationResultDo rtsp conn ctx rq $ \ar -> 
+      case ar of
+        Right uid -> action (Just uid)
+        Left MissingAuthorisation -> action Nothing
+        Left err -> do 
+                       return $ handleAuthFailure cseq ctx err
+
+withAuthenticationResultDo ::       
+  RtspService  ->                           -- ^ The current state of the RTSP server
+  RtspConnection ->                         -- ^ The connection that we're trying to authenticate
+  AuthContext ->                            -- ^ The current connection's authentication context
+  Rtsp.MessageHeader ->                     -- ^ The RTSP request to authenticate
+  (AuthResult UserId -> IO Rtsp.Message) -> -- ^ The action to execute on the (possibly) authenticated request
+  IO Rtsp.Message                           -- ^ Returns an RTSP response to send to the client
+withAuthenticationResultDo rtsp conn ctx rq action = 
   let realm = svcRealm rtsp
-      cseq = Rtsp.msgSequence rq
       connId = connectionId conn 
   in do
     now <- getPOSIXTime
     ctx <- getAuthContext rtsp connId      
     userInfo <- runErrorT $ authenticate rtsp rq ctx
     debugLog $ "Authentication returned: " ++ (show userInfo)
-    case userInfo of
-      Right uid -> action uid
-      Left err -> return $ handleAuthFailure cseq ctx err
+    action userInfo
 
 -- | Authentcates a user - i.e. checks that the user exists and that their
 --   credentials match.
@@ -357,9 +441,13 @@ serviceDatabase (Svc _ _ _ db _) = db
 -- RTSP Connection Implementation
 -- ----------------------------------------------------------------------------
 
+type ChannelId = Int
+
 data ConnReply = NoReply
                | OK
+               | Error
                | Terminate
+               | Transport RtpTransport
                deriving (Show)
 
 type ReplyVar = TMVar ConnReply
@@ -372,11 +460,15 @@ data ConnMsg = Hello ReplyVar
              | InboundRequest Rtsp.Message
              | OutboundResponse Rtsp.Message
              | InboundPacket Rtsp.Packet
+             | OutboundPacket ChannelId B.ByteString
              | GetItemToSend (TMVar ItemToSend)
              | BadRequest
              | CloseConnection
              | WriterExited
              | ReaderExited
+             | CreateInterleavedTransport ChannelId ChannelId
+             | DestroyInterleavedChannels [ChannelId]
+             | SetChannelHandlers [(ChannelId, PacketHandler)]
              deriving (Show)
 
 data ConnState = ConnAlive
@@ -394,7 +486,8 @@ data ConnInfo = State {
   writerThread    :: !ThreadId,
   writerReplyVar  :: !(Maybe (TMVar ItemToSend)),
   sendQueue       :: ![ItemToSend],
-  pendingMessages :: !(Map.Map Int Rtsp.MessageHeader)
+  pendingMessages :: !(Map.Map Int Rtsp.MessageHeader),
+  connChannels    :: !(Map.Map ChannelId (Maybe PacketHandler))   
 }
 
 type RtspSvc = Service ConnMsg ConnReply ConnInfo
@@ -414,9 +507,9 @@ connectionId (MkConn connId _) = connId
 -- | Spawns a new connection manager thread and returns an RtspConnection handle 
 --   that can used to address the connection
 newConnection :: ConnectionId -> RtspService -> Socket -> Int -> IO RtspConnection
-newConnection connId rtsp s maxData = do
+newConnection connectionId rtsp s maxData = do
     svc <- newService (newState) (handleCall) (closeState)
-    return $ MkConn connId svc
+    return $ MkConn connectionId svc
   where
     newState :: RtspSvc -> IO ConnInfo
     newState svc = 
@@ -424,7 +517,18 @@ newConnection connId rtsp s maxData = do
       in do debugLog "Entering new connection thread"
             readerTid <- forkIO $ reader s maxData svc
             writerTid <- forkIO $ writer s svc
-            return $ State connId (MkConn connId svc) s ConnAlive rtsp readerTid writerTid Nothing [] Map.empty
+            return $! State { 
+              connId = connectionId,
+              connHandle = (MkConn connectionId svc),
+              connSocket = s,
+              connState = ConnAlive,
+              connRtspService = rtsp,
+              readerThread = readerTid,
+              writerThread = writerTid,
+              writerReplyVar = Nothing,
+              sendQueue = [],
+              pendingMessages = Map.empty,
+              connChannels = Map.empty }
       
     closeState :: ConnInfo -> IO ()
     closeState state = do 
@@ -433,6 +537,21 @@ newConnection connId rtsp s maxData = do
       
 sendResponse :: RtspConnection -> Rtsp.Message -> IO ()
 sendResponse (MkConn _ svc) msg = post svc $! OutboundResponse msg
+
+-- | Creates a new RTSP transport that will interleave packets into the RTSP
+--   control stream 
+newRtspTransport :: RtspConnection -> TransportSpec -> RtspResultIO RtpTransport
+newRtspTransport (MkConn _ svc) spec = 
+  let params       = transportParams spec
+      channels     = maybe [] (\(Interleaved cs) -> cs) $ find isInterleaved params
+      (rtp:rtcp:_) = map fromIntegral channels 
+  in do 
+    if channels == [] || ((length channels) < 2)
+      then throwError Rtsp.UnsupportedTransport
+      else do rval <- liftIO $ call svc (CreateInterleavedTransport rtp rtcp)
+              case rval of 
+                Transport t -> return t
+                _ -> throwError Rtsp.UnsupportedTransport
 
 -- | Handles a message from a client
 handleCall :: ConnMsg -> ConnInfo -> IO (ConnReply, ConnInfo)
@@ -447,7 +566,20 @@ handleCall message state =
                                 
       OutboundResponse msg  -> do state' <- sendOutboundMessage msg state
                                   return (NoReply, state')
-                                        
+                                  
+      OutboundPacket channel payload -> do state' <- sendOutboundPacket channel payload state
+                                           return (NoReply, state')
+      
+      CreateInterleavedTransport a b -> return $ createInterleavedTransport conn (a, b) state
+      
+      DestroyInterleavedChannels cs -> let state' = destroyInterleavedChannels cs state
+                                       in return (NoReply, state')
+      
+      SetChannelHandlers handlers -> let cs = connChannels state
+                                         cs' = foldl' (\m (k,v) -> Map.insert k (Just v) m) cs handlers 
+                                         state' = state {connChannels = cs'}
+                                     in return (NoReply, state')
+
       WriterExited -> do debugLog "Writer thread has exited"
                          sClose (connSocket state)
                          return (NoReply, state)
@@ -469,12 +601,50 @@ sendOutboundMessage (msg, body) state =
       msg' = Rtsp.msgSetHeaders msg [("Server", version)]
   in putItemToSend (MsgItem (msg', body)) state
   
+sendOutboundPacket :: ChannelId -> B.ByteString -> ConnInfo -> IO ConnInfo
+sendOutboundPacket channel payload state = putItemToSend (Packet (Rtsp.Packet channel payload)) state
+  
 processBadRequest :: ConnInfo -> IO ConnInfo
 processBadRequest state = 
   let (msg, body) = badRequest
   in do state' <- putItemToSend (MsgItem (msg, body)) (clearQueue state)
         disconnect state'
+
+-- | Creates an interleaved transport 
+createInterleavedTransport :: RtspConnection -> (ChannelId, ChannelId) -> ConnInfo -> (ConnReply, ConnInfo)
+createInterleavedTransport conn@(MkConn _ svc) proposed@(rtp, rtcp) state = 
+  let channels  = connChannels state
+      register  = \(rtpH, rtcpH) -> registerTransportCallbacks conn [(rtp, rtpH), (rtcp, rtcpH)]
+      txRtp     = \p -> sendPacket conn rtp p
+      txRtcp    = \p -> sendPacket conn rtcp p
+      spec      = TransportSpec RTP AVP TCP [Interleaved [fromIntegral rtp, fromIntegral rtcp]]
+      destroy   = post svc $ DestroyInterleavedChannels [rtp, rtcp]
+      channels' = Map.insert rtp Nothing $ Map.insert rtcp Nothing channels
+      transport = RtpTransport { transportReg     = register,
+                                 transportTxRtp   = PacketHandler txRtp,
+                                 transportTxRtcp  = PacketHandler txRtcp,
+                                 transportDestroy = destroy,
+                                 transportGetSpec = spec,
+                                 transportDisplay = "Interleaved Transport: " ++ (show rtp) ++ ", " ++ (show rtcp) }
+  in if rtp `Map.member` channels || rtcp `Map.member` channels
+    then (Error, state)
+    else (Transport transport, state {connChannels = channels'})
+    
+-- | Removes the specified channels from the 
+destroyInterleavedChannels :: [ChannelId] -> ConnInfo -> ConnInfo
+destroyInterleavedChannels cs state = 
+  let channels' = Map.filterWithKey (\x _ -> x `notElem` cs) $ connChannels state
+  in channels' `seq` state {connChannels = channels'}
   
+-- | Binds the channels 
+registerTransportCallbacks :: RtspConnection -> [(ChannelId, PacketHandler)] -> IO ()
+registerTransportCallbacks (MkConn _ svc) handlers = do 
+  call svc $ SetChannelHandlers handlers
+  return ()
+  
+sendPacket :: RtspConnection -> Int -> B.ByteString -> IO ()
+sendPacket (MkConn _ svc) channel payload = post svc $ OutboundPacket channel payload
+    
 disconnect :: ConnInfo -> IO ConnInfo
 disconnect state = do
   let sk     = connSocket state
@@ -627,6 +797,8 @@ errorLog = Log.err "rtspc"
  
 debugLog :: String -> IO ()
 debugLog = Log.debug "rtspc"
+
+debugL = liftIO . debugLog
 
 infoLog :: String -> IO ()
 infoLog = Log.info "rtspc"

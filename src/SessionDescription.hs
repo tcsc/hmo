@@ -61,18 +61,6 @@ streamEncodings stream =
       params = streamParams stream
   in map (\(_,enc) -> showEncoding majorType enc) params
 
-data TxMode = Unicast | Multicast
-              deriving (Eq, Show)
-
-data TransportMode = Play | Record
-                     deriving (Eq, Show)
-
-data TransportSpec = Transport {
-    transMode     :: !TransportMode,
-    transTxMode   :: !TxMode,
-    transSrcPorts :: !PortList
-  } deriving (Show)
-
 ------------------------------------------------------------------------
 -- Utils
 -- ----------------------------------------------------------------------------  
