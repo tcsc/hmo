@@ -5,6 +5,7 @@ module SessionManager(
   SessionResultIO,
   newSessionManager,
   createSession,
+  bindStreamSource,
   SessionManager.unitTests
 ) where
   
@@ -18,6 +19,7 @@ import Test.HUnit
 import CommonTypes
 import qualified FileSystem as Fs
 import qualified Logger as Log
+import MediaChunk
 import Session
 import qualified Sdp as Sdp
 import SessionDescription
@@ -98,6 +100,12 @@ createSession (SM scr fs) path desc uid = do
        let root = if ((head . reverse) path) == '/' then path else path ++ "/"
            concatUri s = streamUri s >>= \uri -> return ((root ++ uri), s)
        in mapM concatUri streams
+       
+bindStreamSource :: SessionManager -> String -> ChunkSource -> Maybe UserId -> SessionResultIO ()
+bindStreamSource _ _ _ Nothing = throwError Unauthorised
+bindStreamSource (SM scr fs) path src (Just userId) = do
+  dbgL $ "Attemping to supply a source for stream " ++ path 
+  return ()
        
 -- | 
 getInfo :: ScriptExecutor -> String -> UserId -> SessionResultIO (MountPoint, UserRights)
