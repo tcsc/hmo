@@ -12,6 +12,7 @@ module Rtsp (
   embeddedPacket,
   extractMessageBytes,
   parseMessage,
+  parseTransport,
   formatMessage,
   formatPacket,
   hdrContentType,
@@ -49,12 +50,15 @@ import Text.Parsec.Char
 import qualified Multimap as MM
 import qualified Headers as Headers
 import Parsec
+import SessionDescription
+import RtpTransport 
 
 data Status = OK
             | BadRequest
             | AuthorizationRequired
             | NotFound
             | SessionNotFound
+            | UnsupportedTransport
             | InternalServerError
             | NotImplemented
             | BadGateway
@@ -183,12 +187,12 @@ response = do
 verb = do 
   text <- many1 letter
   let verb = case map (toUpper) text of
-               "ANNOUNCE" -> Announce
-               "DESCRIBE" -> Describe
-               "SETUP"    -> Setup
-               "PLAY"     -> Play
-               "TEARDOWN" -> Teardown
-               s          -> OtherVerb text
+               "ANNOUNCE" -> Rtsp.Announce
+               "DESCRIBE" -> Rtsp.Describe
+               "SETUP"    -> Rtsp.Setup
+               "PLAY"     -> Rtsp.Play
+               "TEARDOWN" -> Rtsp.Teardown
+               s          -> Rtsp.OtherVerb text
   return verb 
   
     
@@ -249,12 +253,115 @@ fromStatus :: Status -> Int
 fromStatus (Unknown n) = n 
 fromStatus s = (Bimap.!>) statusMap s
 
-{-
 parseTransport :: String -> Maybe TransportSpec
 parseTransport s = case parse transport "" s of
-                     Left _   -> Nothing
-                     Right elems -> 
--}              
+                     Left _  -> Nothing
+                     Right t -> return t 
+
+formatTransport :: TransportSpec -> String
+formatTransport t = 
+  let params = transportParams t
+      proto = formatProto t 
+  in concat $ intersperse ";" (proto : map formatParam params)
+  where
+    formatProto :: TransportSpec -> String
+    formatProto (TransportSpec RTP AVP UDP _)  = "RTP/AVP/UDP"
+    formatProto (TransportSpec RTP AVP TCP _)  = "RTP/AVP/TCP"
+    formatProto (TransportSpec SRTP AVP UDP _) = "SRTP/AVP/UDP"
+    formatProto (TransportSpec SRTP AVP TCP _) = "SRTP/AVP/TCP"
+    
+    formatParam :: TransportParam -> String
+    formatParam Multicast        = "multicast"
+    formatParam Unicast          = "unicast"
+    formatParam (Destination s)  = "destination=" ++ s
+    formatParam (Interleaved cs) = "interleaved=" ++ (formatPortList cs)
+    formatParam Append           = "append"
+    formatParam (TTL n)          = "ttl=" ++ (show n)
+    formatParam (Port ps)        = "port=" ++ (formatPortList ps)
+    formatParam (ClientPort ps)  = "client_port=" ++ (formatPortList ps) 
+    formatParam (ServerPort ps)  = "server_port=" ++ (formatPortList ps) 
+    formatParam (SyncSource n)   = "ssrc="
+    formatParam (Layers n)       = "layers=" ++ (show n)
+    formatParam (Mode m)         = let s = case m of 
+                                            RtpTransport.Play -> "PLAY"; 
+                                            RtpTransport.Record -> "RECORD";
+                                            RtpTransport.Receive -> "RECEIVE"
+                                   in "mode=\"" ++ s ++ "\""
+                                
+    formatPortList :: [Integer] -> String
+    formatPortList = ((concat . intersperse "-") . map show) 
+
+instance Show TransportSpec where 
+  show = formatTransport
+
+transport = do
+    proto <- transportProtocol
+    char '/'
+    string "AVP"
+    lowerTx <- lowerTransport <|> return UDP
+    char ';'
+    parameters <- transportParameters
+    return $! TransportSpec {
+      transportProtocol       = proto,
+      transportProfile        = AVP,
+      transportLowerTransport = lowerTx,
+      transportParams         = parameters }
+  where
+    lowerTransport = do char '/'
+                        s <- many1 (noneOf ";")
+                        case (map toLower s) of
+                          "tcp" -> return TCP
+                          "udp" -> return UDP
+                          _ -> fail "expected TCP or UDP"
+                          
+    transportProtocol = do s <- many1 (noneOf "/")
+                           case (map toLower s) of
+                             "rtp"  -> return $ RTP
+                             "srtp" -> return $ SRTP
+                             _      -> fail "expected RTP or SRTP"
+
+transportParameters = param `sepBy` (char ';')
+ where param = unicast <|> multicast 
+               <|> destination
+               <|> interleaved
+               <|> append
+               <|> ttl
+               <|> layers
+               <|> port 
+               <|> clientPorts 
+               <|> serverPorts
+               <|> syncSource
+               <|> mode
+       unicast     = simpleValue "unicast" Unicast
+       multicast   = simpleValue "multicast" Multicast
+       destination = namedValue "destination" (many $ noneOf ";") Destination
+       interleaved = namedValue "interleaved" portList Interleaved
+       append      = simpleValue "append" Append
+       ttl         = namedValue "ttl" decimalInteger TTL
+       layers      = namedValue "layers" decimalInteger Layers
+       port        = namedValue "port" portList Port
+       clientPorts = namedValue "client_port" portList ClientPort
+       serverPorts = namedValue "server_port" portList ServerPort
+       syncSource  = namedValue "ssrc" hexInteger SyncSource
+       mode        = namedValue "mode" transportMode Mode
+        
+       portList = decimalInteger `sepBy` (char '-')
+        
+       transportMode = optionallyQuoted (play <|> record <|> receive)
+         where play    = literal "play" RtpTransport.Play
+               record  = literal "record" Record
+               receive = literal "receive" Receive
+        
+       literal s ctor = do { caseInsensitiveString s; return ctor; }
+        
+       simpleValue name ctor = do { try (string name); return ctor; }
+        
+       namedValue name p ctor = do { try (string name);
+                                     char '=';
+                                     value <- p;
+                                     return $ ctor value; } 
+                         
+
 -- ----------------------------------------------------------------------------
 -- RTSP formatter
 -- ----------------------------------------------------------------------------
@@ -313,6 +420,7 @@ statusDescriptions = Map.fromList $ map (\(s,t) -> (s, Utf8.fromString t)) [
                         (AuthorizationRequired, "Authorization Required"),
                         (NotFound,              "Not Found"),
                         (SessionNotFound,       "Session Not Found"),
+                        (UnsupportedTransport,  "Unsupported Transport"),
                         (InternalServerError,   "Internal Server Error"), 
                         (NotImplemented,        "Not Implemented"),
                         (BadGateway,            "Bad Gateway"),
@@ -326,6 +434,7 @@ statusMap = Bimap.fromList [ (200, OK),
                              (401, AuthorizationRequired),
                              (404, NotFound),
                              (454, SessionNotFound),
+                             (461, UnsupportedTransport),
                              (500, InternalServerError), 
                              (501, NotImplemented),
                              (502, BadGateway),
@@ -378,32 +487,71 @@ testParsePacketNotEnoughData = TestCase (do
     let bytes = B.pack [0x24, 0x01, 0x00, 0x10, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07]
     let mp = embeddedPacket bytes
     assertBool "Parse failed" (isNothing mp))
-  
-testParseUnicastTransport = "RTP/AVP;unicast;client_port=6970-6971;mode=receive"
+
+
+testParseTransport = TestList [unicastRecord, interleavedRecord, interleavedPlay, interleavedUnspec]
+  where 
+    test name text expected = TestCase (
+      do case parseTransport text of 
+          Nothing -> assertFailure (name ++ ": parse failed on \"" ++ text ++ "\"")
+          Just t -> assertEqual name expected t)
+          
+    unspecifiedLower = 
+          let text = "RTP/AVP;unicast;client_port=6970-6971;mode=record"
+              expected = TransportSpec RTP AVP UDP [Unicast, ClientPort [6970, 6971], Mode Record]
+          in test "Parse Unicast Transport" text expected
+        
+    unicastRecord = 
+      let text = "RTP/AVP;unicast;client_port=6970-6971;mode=record"
+          expected = TransportSpec RTP AVP UDP [Unicast, ClientPort [6970, 6971], Mode Record]
+      in test "Parse Unicast Transport" text expected
+
+    interleavedUnspec = 
+      let text = "RTP/AVP/TCP;interleaved=0-1"
+          expected = TransportSpec RTP AVP TCP [Interleaved [0, 1]]
+      in test "Parse Interleaved Transport" text expected
+      
+    interleavedRecord = 
+      let text = "RTP/AVP/TCP;interleaved=0-1;mode=record"
+          expected = TransportSpec RTP AVP TCP [Interleaved [0, 1], Mode Record]
+      in test "Parse Interleaved Transport (Record)" text expected
+      
+    interleavedPlay = 
+         let text = "RTP/AVP/TCP;interleaved=0-1;mode=play"
+             expected = TransportSpec RTP AVP TCP [Interleaved [0, 1], Mode RtpTransport.Play]
+         in test "Parse Interleaved Transport (Play)" text expected
+
+testFormatTransport = TestList [interleaved]
+  where interleaved = TestCase (
+          let name = "Format Interleaved Transport"
+              transport = TransportSpec RTP AVP TCP [Interleaved [0, 1]]
+              expected = "RTP/AVP/TCP;interleaved=0-1"
+          in assertEqual name expected $ show transport)
 
 testVerbs = 
   let testParseVerb s = fromRight $ parse verb "" (Utf8.fromString s) 
   in TestList [
-    "Parse Describe" ~: Describe         ~=? testParseVerb "DESCRIBE",
-    "Parse Announce" ~: Announce         ~=? testParseVerb "ANNOUNCE",
-    "Parse Setup"    ~: Setup            ~=? testParseVerb "SETUP",
-    "Parse Play"     ~: Play             ~=? testParseVerb "PLAY",
-    "Parse Teardown" ~: Teardown         ~=? testParseVerb "TEARDOWN",
-    "Other"          ~: OtherVerb "narf" ~=? testParseVerb "narf"]
+    "Parse Describe" ~: Rtsp.Describe         ~=? testParseVerb "DESCRIBE",
+    "Parse Announce" ~: Rtsp.Announce         ~=? testParseVerb "ANNOUNCE",
+    "Parse Setup"    ~: Rtsp.Setup            ~=? testParseVerb "SETUP",
+    "Parse Play"     ~: Rtsp.Play             ~=? testParseVerb "PLAY",
+    "Parse Teardown" ~: Rtsp.Teardown         ~=? testParseVerb "TEARDOWN",
+    "Other"          ~: Rtsp.OtherVerb "narf" ~=? testParseVerb "narf"]
 
 testStatusToEnum = TestList [
-  "OK"                ~: OK                  ~=? Rtsp.toStatus 200,
-  "Bad Request"       ~: BadRequest          ~=? Rtsp.toStatus 400,
-  "Not Found"         ~: NotFound            ~=? Rtsp.toStatus 404, 
-  "Session Not Found" ~: SessionNotFound     ~=? Rtsp.toStatus 454, 
-  "Error"             ~: InternalServerError ~=? Rtsp.toStatus 500,
-  "Not Implemented"   ~: NotImplemented      ~=? Rtsp.toStatus 501,
-  "Bad Gateway"       ~: BadGateway          ~=? Rtsp.toStatus 502,
-  "Unavailable"       ~: ServiceUnavailable  ~=? Rtsp.toStatus 503,
-  "Gateway Timeout"   ~: GatewayTimeout      ~=? Rtsp.toStatus 504,
-  "Unsupported Ver"   ~: VersionNotSupported ~=? Rtsp.toStatus 505,
-  "Unsupported Opt"   ~: OptionNotSupported  ~=? Rtsp.toStatus 551,
-  "Unknown"           ~: Unknown 0           ~=? Rtsp.toStatus 0]
+  "OK"                    ~: OK                   ~=? Rtsp.toStatus 200,
+  "Bad Request"           ~: BadRequest           ~=? Rtsp.toStatus 400,
+  "Not Found"             ~: NotFound             ~=? Rtsp.toStatus 404, 
+  "Session Not Found"     ~: SessionNotFound      ~=? Rtsp.toStatus 454, 
+  "Unsupported Transport" ~: UnsupportedTransport ~=? Rtsp.toStatus 461, 
+  "Error"                 ~: InternalServerError  ~=? Rtsp.toStatus 500,
+  "Not Implemented"       ~: NotImplemented       ~=? Rtsp.toStatus 501,
+  "Bad Gateway"           ~: BadGateway           ~=? Rtsp.toStatus 502,
+  "Unavailable"           ~: ServiceUnavailable   ~=? Rtsp.toStatus 503,
+  "Gateway Timeout"       ~: GatewayTimeout       ~=? Rtsp.toStatus 504,
+  "Unsupported Ver"       ~: VersionNotSupported  ~=? Rtsp.toStatus 505,
+  "Unsupported Opt"       ~: OptionNotSupported   ~=? Rtsp.toStatus 551,
+  "Unknown"               ~: Unknown 0            ~=? Rtsp.toStatus 0]
 
 unitTests = TestList [
   TestLabel "Parse Minimal Request" testParseMinimalRequest,
@@ -413,4 +561,6 @@ unitTests = TestList [
   TestLabel "Packet Parsing - simple" testParsePacket,
   TestLabel "Packet Parsing - insuffcient data" testParsePacketNotEnoughData,
   testVerbs,
-  testStatusToEnum ]
+  testStatusToEnum,
+  testParseTransport,
+  testFormatTransport ]
