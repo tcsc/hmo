@@ -43,14 +43,15 @@ instance Exception ScriptError
 
 type ScriptResult a = Either ScriptError a 
 type ScriptResultIO a = ErrorT ScriptError IO a 
-
-data ScriptAction = GetUserInfo String
-                  | GetMountPoint String
-                  | GetUserRights Int Int
-
 type Rpy = Either ScriptError LuaValue
 
-data ScriptExecutor = SM (Service ScriptAction Rpy Lua.LuaState)
+data ScriptAction = GetUserInfo String (TMVar Rpy)
+                  | GetMountPoint String (TMVar Rpy)
+                  | GetUserRights Int Int (TMVar Rpy)
+
+type ActionFactory = TMVar Rpy -> ScriptAction
+
+data ScriptExecutor = SM (Service ScriptAction Lua.LuaState)
 
 -- | A function that knows how to convert something representated as a Lua value
 --   into a haskell data type. 
@@ -81,7 +82,7 @@ new fileName = do
                         throwError e
 
   liftIO $ do infoLog $ "Starting script executor"
-              svc <- newService (\_ -> return lua) handleCall (Lua.close)
+              svc <- newService (\_ -> return lua) handleRequest (Lua.close)
               return (SM svc)
 
 -- | Looks up the user information and returns it to the caller 
@@ -103,7 +104,7 @@ queryUserRights se (UserId uid _) mountPointId = do
 
 -- | Calls the script executor service and translates the response into whatever
 --   type the caller requested
-callAndParseResult :: ScriptExecutor -> ScriptAction -> Parser a -> ScriptResultIO (Maybe a)
+callAndParseResult :: ScriptExecutor -> ActionFactory -> Parser a -> ScriptResultIO (Maybe a)
 callAndParseResult (SM svc) action parseResult = do
   reply <- liftIO $ call svc action
   case reply of 
@@ -118,18 +119,20 @@ callAndParseResult (SM svc) action parseResult = do
 -- | Handles the callback from the underlying service, executes the appropriate
 --   script and returns the semi-parsed lua response to the caller for further
 --   parsing.
-handleCall :: ScriptAction -> Lua.LuaState -> IO (Rpy, Lua.LuaState)
-handleCall (GetUserInfo userName) lua   = run lua "getUserInfo" [LString userName]   
-handleCall (GetMountPoint path) lua     = run lua "getMountPoint" [LString path]
-handleCall (GetUserRights uId mpId) lua = run lua "getUserRights" [LNum (fromIntegral mpId), LNum (fromIntegral uId)]
+handleRequest :: ScriptAction -> Lua.LuaState -> IO Lua.LuaState
+handleRequest (GetUserInfo userName rpyVar) lua   = run lua "getUserInfo" [LString userName] rpyVar
+handleRequest (GetMountPoint path rpyVar) lua     = run lua "getMountPoint" [LString path] rpyVar
+handleRequest (GetUserRights uId mpId rpyVar) lua = run lua "getUserRights" [LNum (fromIntegral mpId), LNum (fromIntegral uId)] rpyVar
+
 
 -- | Executes the stated script, collects the result from the Lua runtime 
 --   (assuming a single value) and wraps it in a LuaValue type and returns it
 --   to the caller
-run :: Lua.LuaState -> String -> [LuaValue] -> IO (Rpy, Lua.LuaState)
-run lua scriptName args = do 
+run :: Lua.LuaState -> String -> [LuaValue] -> TMVar Rpy -> IO Lua.LuaState
+run lua scriptName args rpyVar = do 
     rval <- runErrorT $ runAndCollectResult lua scriptName args
-    return (rval, lua)
+    reply rpyVar rval
+    return lua
   where     
     runAndCollectResult :: Lua.LuaState -> String -> [LuaValue] -> ScriptResultIO LuaValue
     runAndCollectResult lua script args = do

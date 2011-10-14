@@ -345,16 +345,32 @@ testAuthentication :: Assertion
 testAuthentication = do
     let uid = User 0 "Mufasa" "narfity narf" -- "Circle Of Life"
     let realm = "testrealm@host.com"
-    ctx <- makeContext realm
+    ctx <- makeContext realm "dcd98b7102dd2f0e8b11d0f600bfb0c093"
     assertEqual "Authentication Failed" (Right True) $ checkCreds "GET" digestTextExpected uid $! ctx
-  where 
-    makeContext r = do 
-      ctx <- newAuthContextIO r 10
-      return ctx { ctxNonce = "dcd98b7102dd2f0e8b11d0f600bfb0c093" } 
+
+makeContext r n = do 
+  ctx <- newAuthContextIO r 10
+  return ctx { ctxNonce =  n } 
+
+testQtAuthentication =
+  let digest = Digest [ DigUserName "trent",
+                        DigRealm "rtsp-server",
+                        DigNonce "ea995080f2b97218", 
+                        DigURI "/trent.sdp", 
+                        DigQop QopAuth,
+                        DigNonceCount 1,
+                        DigClientNonce "3ce8b1e6",
+                        DigResponse "9848b05e17a00db2afadd399f53fcc80", 
+                        DigOpaque "f677a90026c75378f29b23625997aab" ]
+      uid = User 0 "trent" "password"
+  in do 
+    ctx <- makeContext "rtsp-server" "ea995080f2b97218"
+    assertEqual "QT response" (Right True) $ checkCreds "ANNOUNCE" digest uid $! ctx
 
 basicTests = TestList [
   "Basic Parsing" ~: Just (Basic "Aladdin" "open sesame") ~=? parseAuthHeader "Basic QWxhZGRpbjpvcGVuIHNlc2FtZQ==",
   "Digest Parsing" ~: Just digestTextExpected ~=? parseAuthHeader digestTestHeader,
-  TestCase testAuthentication]
+  TestCase testAuthentication,
+  TestCase testQtAuthentication]
   
 unitTests = TestList [basicTests]

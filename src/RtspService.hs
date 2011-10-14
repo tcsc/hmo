@@ -470,22 +470,12 @@ serviceDatabase (Svc _ _ _ db _) = db
 -- ----------------------------------------------------------------------------
 
 type ChannelId = Int
-
-data ConnReply = NoReply
-               | OK
-               | Error
-               | Terminate
-               | Transport RtpTransport
-               deriving (Show)
-
-type ReplyVar = TMVar ConnReply
   
 data ItemToSend = MsgItem Rtsp.Message
                 | Packet Rtsp.Packet
                 | QuitWriter
 
-data ConnMsg = Hello ReplyVar
-             | InboundRequest Rtsp.Message
+data ConnMsg = InboundRequest Rtsp.Message
              | OutboundResponse Rtsp.Message
              | InboundPacket Rtsp.Packet
              | OutboundPacket ChannelId B.ByteString
@@ -494,9 +484,9 @@ data ConnMsg = Hello ReplyVar
              | CloseConnection
              | WriterExited
              | ReaderExited
-             | CreateInterleavedTransport ChannelId ChannelId
+             | CreateInterleavedTransport ChannelId ChannelId (TMVar (Maybe RtpTransport))
              | DestroyInterleavedChannels [ChannelId]
-             | SetChannelHandlers [(ChannelId, PacketHandler)]
+             | SetChannelHandlers [(ChannelId, PacketHandler)] (TMVar ())
              deriving (Show)
 
 data ConnState = ConnAlive
@@ -518,7 +508,7 @@ data ConnInfo = State {
   connChannels    :: !(Map.Map ChannelId (Maybe PacketHandler))   
 }
 
-type RtspSvc = Service ConnMsg ConnReply ConnInfo
+type RtspSvc = Service ConnMsg ConnInfo
   
 data RtspConnection = MkConn ConnectionId RtspSvc
 
@@ -578,11 +568,11 @@ newRtspTransport (MkConn _ svc) spec =
       then throwError Rtsp.UnsupportedTransport
       else do rval <- liftIO $ call svc (CreateInterleavedTransport rtp rtcp)
               case rval of 
-                Transport t -> return t
-                _ -> throwError Rtsp.UnsupportedTransport
+                Just t -> return t
+                Nothing -> throwError Rtsp.UnsupportedTransport
 
 -- | Handles a message from a client
-handleCall :: ConnMsg -> ConnInfo -> IO (ConnReply, ConnInfo)
+handleCall :: ConnMsg -> ConnInfo -> IO ConnInfo
 handleCall message state = 
   let conn = connHandle state
       rtsp = connRtspService state
@@ -590,38 +580,43 @@ handleCall message state =
     case message of
       InboundRequest msg -> do debugLog $ "Received Msg: " ++ (show $ fst msg)
                                handleRequest rtsp conn msg
-                               return (NoReply, state)
+                               return state
                                 
       OutboundResponse msg  -> do state' <- sendOutboundMessage msg state
-                                  return (NoReply, state')
+                                  return state'
                                   
       OutboundPacket channel payload -> do state' <- sendOutboundPacket channel payload state
-                                           return (NoReply, state')
+                                           return state'
       
-      CreateInterleavedTransport a b -> return $ createInterleavedTransport conn (a, b) state
+      CreateInterleavedTransport a b replyVar -> do
+        (t, state') <- return $ createInterleavedTransport conn (a, b) state
+        reply replyVar t
+        return state'
       
       DestroyInterleavedChannels cs -> let state' = destroyInterleavedChannels cs state
-                                       in return (NoReply, state')
+                                       in return state'
       
-      SetChannelHandlers handlers -> let cs = connChannels state
-                                         cs' = foldl' (\m (k,v) -> Map.insert k (Just v) m) cs handlers 
-                                         state' = state {connChannels = cs'}
-                                     in return (NoReply, state')
+      SetChannelHandlers handlers rpyVar -> 
+        let cs = connChannels state
+            cs' = foldl' (\m (k,v) -> Map.insert k (Just v) m) cs handlers 
+            state' = state {connChannels = cs'}
+        in do reply rpyVar ()   
+              return state'
 
       WriterExited -> do debugLog "Writer thread has exited"
                          sClose (connSocket state)
-                         return (NoReply, state)
+                         return state
                                         
-      InboundPacket pkt -> return (NoReply, state)
+      InboundPacket pkt -> return state
       
       GetItemToSend rx -> do state' <- getItemToSend rx state 
-                             return (NoReply, state')
+                             return state'
                              
       BadRequest -> do state' <- processBadRequest state 
-                       return (NoReply, state')
+                       return state'
                        
       _ -> do errorLog $ "Unexpected command message: " ++ (show message)
-              return (NoReply, state)
+              return state
      
 sendOutboundMessage :: Rtsp.Message -> ConnInfo -> IO ConnInfo
 sendOutboundMessage (msg, body) state = 
@@ -639,7 +634,7 @@ processBadRequest state =
         disconnect state'
 
 -- | Creates an interleaved transport 
-createInterleavedTransport :: RtspConnection -> (ChannelId, ChannelId) -> ConnInfo -> (ConnReply, ConnInfo)
+createInterleavedTransport :: RtspConnection -> (ChannelId, ChannelId) -> ConnInfo -> (Maybe RtpTransport, ConnInfo)
 createInterleavedTransport conn@(MkConn _ svc) proposed@(rtp, rtcp) state = 
   let channels  = connChannels state
       register  = \(rtpH, rtcpH) -> registerTransportCallbacks conn [(rtp, rtpH), (rtcp, rtcpH)]
@@ -655,8 +650,8 @@ createInterleavedTransport conn@(MkConn _ svc) proposed@(rtp, rtcp) state =
                                  transportGetSpec = spec,
                                  transportDisplay = "Interleaved Transport: " ++ (show rtp) ++ ", " ++ (show rtcp) }
   in if rtp `Map.member` channels || rtcp `Map.member` channels
-    then (Error, state)
-    else (Transport transport, state {connChannels = channels'})
+    then (Nothing, state)
+    else (Just transport, state {connChannels = channels'})
     
 -- | Removes the specified channels from the connections map of channel ids
 --

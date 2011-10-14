@@ -7,6 +7,7 @@ module Session(
   streamUri
 ) where 
 
+import Control.Concurrent.STM
 import Control.Monad
 import Data.Maybe
 
@@ -15,10 +16,10 @@ import Service
 import SessionDescription
 import qualified Logger as Log
 
-data SsnMsg = SsnGetStreams
-data SsnRpy = SsnStreams [MediaStream]
-            | SsnOK
-data MediaSession = Session (Service SsnMsg SsnRpy SessionState)
+
+data SsnMsg = SsnGetStreams (TMVar [MediaStream])
+
+data MediaSession = Session (Service SsnMsg SessionState)
 
 data SessionState = SsnState {
   ssnStreams :: ![MediaStream],
@@ -40,15 +41,13 @@ newSession desc uid =
     teardown _ = return ()
     
 getStreams :: MediaSession -> IO [MediaStream]
-getStreams (Session svc) = do
-  SsnStreams ss <- call svc SsnGetStreams
-  return ss
+getStreams (Session svc) = call svc SsnGetStreams
   
-handleSessionCall :: SsnMsg -> SessionState -> IO (SsnRpy, SessionState)
+handleSessionCall :: SsnMsg -> SessionState -> IO SessionState
 handleSessionCall msg state = 
   case msg of 
-    SsnGetStreams -> let ss = ssnStreams state
-                     in return $! (SsnStreams ss, state)
+    SsnGetStreams rpyVar -> do reply rpyVar $ ssnStreams state
+                               return state
   
 deleteSession :: MediaSession -> IO ()
 deleteSession (Session svc) = stopService svc
@@ -57,17 +56,17 @@ deleteSession (Session svc) = stopService svc
 --
 -- ----------------------------------------------------------------------------
 
-data StrMsg = StrGetUri
+data StrMsg = StrGetUri (TMVar String)
             | StrSetup
             | StrPlay
             | StrPause
             | StrTeardown
-data StrRpy = StrOK
-            | StrUri String
+
 data StreamState = Stream {
   ssnUri :: String
   }
-data MediaStream = Str (Service StrMsg StrRpy StreamState)
+
+data MediaStream = Str (Service StrMsg StreamState)
 
 newStream :: StreamDescription -> IO (Maybe MediaStream)
 newStream streamDesc = 
@@ -90,13 +89,13 @@ newStream streamDesc =
     
 -- | gets the relative uri for controlling the stream  
 streamUri :: MediaStream -> IO String
-streamUri (Str svc) = do StrUri s <- call svc StrGetUri
-                         return s 
+streamUri (Str svc) = call svc StrGetUri
 
-handleStreamCall :: StrMsg -> StreamState -> IO (StrRpy, StreamState)
+handleStreamCall :: StrMsg -> StreamState -> IO StreamState
 handleStreamCall msg state = do 
   case msg of
-    StrGetUri -> return (StrUri $ ssnUri state, state)
+    StrGetUri rpyVar -> do reply rpyVar $! ssnUri state 
+                           return state
 
 -- ----------------------------------------------------------------------------
 -- Logging
