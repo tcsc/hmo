@@ -9,6 +9,7 @@ module RtpReceiver (
   getChunkSource
 ) where
 
+import Control.Concurrent.STM
 import qualified Data.ByteString as BS
 
 import qualified Logger as Log
@@ -16,12 +17,10 @@ import MediaChunk
 import RtpTransport
 import Service
 
-data RxMsg = BindReceiver ChunkHandler
+data RxMsg = BindReceiver ChunkHandler (TMVar ())
            | Destroy
 
-data RxRpy = OK
-
-type RxSvc = Service RxMsg RxRpy State
+type RxSvc = Service RxMsg State
 data RtpReceiver = Rx RxSvc
 
 data State = State {
@@ -50,10 +49,11 @@ getChunkSource (Rx svc) =
   let register = \h -> do { call svc (BindReceiver h); return () }
   in do return $ ChunkSource {chunkSourceRegister = register} 
         
-handleCall :: RxMsg -> State -> IO (RxRpy, State)
+handleCall :: RxMsg -> State -> IO State
 handleCall msg state = do 
   case msg of
-    BindReceiver _ -> return (OK, state)
+    BindReceiver _ rpyVar -> do reply rpyVar ()
+                                return state
       
 -- ----------------------------------------------------------------------------
 -- Debugging & Logging
